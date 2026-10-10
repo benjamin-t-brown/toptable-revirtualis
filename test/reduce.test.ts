@@ -27,6 +27,7 @@ function base(): RoomState {
         h: 64,
         rotation: 0,
         layer: 1,
+        label: 'Scout',
         owners: ['Ada'],
       },
     ],
@@ -69,6 +70,7 @@ describe('room reducer', () => {
       h: 80,
       rotation: 0.4,
       layer: 2,
+      label: 'Scout',
       owners: ['Ada'],
     });
     op.placement.owners.push('Bea');
@@ -85,7 +87,20 @@ describe('room reducer', () => {
     expect(op.placement.x).toBe(68);
     expect(op.placement.y).toBe(48);
     expect(op.placement.w).toBe(64);
+    expect(op.placement.label).toBe('');
     expect(op.placement.owners).toEqual([]);
+  });
+
+  it('sets and clears a token label', () => {
+    const made = materialize(base(), { type: 'place.update', placementId: 'place-1', label: 'Goblin' }, ids());
+    expect(made.ok).toBe(true);
+    if (!made.ok) return;
+    const next = applyServerOp(base(), made.ops[0]!);
+    expect(next.placements[0]?.label).toBe('Goblin');
+    const cleared = materialize(next, { type: 'place.update', placementId: 'place-1', label: '' }, ids());
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(applyServerOp(next, cleared.ops[0]!).placements[0]?.label).toBe('');
   });
 
   it('turns fog on and normalizes a dragged rectangle', () => {

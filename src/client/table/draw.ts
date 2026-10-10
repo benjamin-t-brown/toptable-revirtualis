@@ -125,6 +125,32 @@ function drawPlacement(ctx: CanvasRenderingContext2D, model: DrawModel, placemen
     ctx.strokeRect(-placement.w / 2, -placement.h / 2, placement.w, placement.h);
   }
   ctx.restore();
+  if (asset?.class === 'token') drawTokenLabel(ctx, model, placement);
+}
+
+function drawTokenLabel(ctx: CanvasRenderingContext2D, model: DrawModel, placement: Placement): void {
+  const label = placement.label.trim();
+  if (!label) return;
+  const zoom = model.camera.zoom;
+  const cos = Math.abs(Math.cos(placement.rotation));
+  const sin = Math.abs(Math.sin(placement.rotation));
+  const halfH = (placement.h * cos + placement.w * sin) / 2;
+  const centerX = placement.x + placement.w / 2;
+  const top = placement.y + placement.h / 2 - halfH;
+  const fontPx = 13 / zoom;
+  const pad = 3 / zoom;
+  const gap = 5 / zoom;
+  ctx.save();
+  ctx.font = `${fontPx}px Verdana, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  const width = Math.min(ctx.measureText(label).width, 220 / zoom);
+  const textY = top - gap;
+  ctx.fillStyle = 'rgba(14, 20, 12, 0.82)';
+  ctx.fillRect(centerX - width / 2 - pad, textY - fontPx - pad, width + pad * 2, fontPx + pad * 2);
+  ctx.fillStyle = '#E7D5B1';
+  ctx.fillText(label, centerX, textY, 220 / zoom);
+  ctx.restore();
 }
 
 function drawHandles(ctx: CanvasRenderingContext2D, model: DrawModel, placement: Placement): void {

@@ -31,6 +31,7 @@ export function sceneryPlacement(
     h: frame.h,
     rotation: frame.rotation,
     layer: kind === 'map' ? -1 : -2,
+    label: '',
     owners: [],
   };
 }

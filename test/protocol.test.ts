@@ -42,6 +42,22 @@ describe('scene size protocol', () => {
     expect(parseClientOp({ type: 'place.copy', placementId, x: '12', y: 40 })).toBeNull();
   });
 
+  it('trims a token label and rejects a non-string', () => {
+    const placementId = '00000000-0000-4000-8000-000000000003';
+    expect(parseClientOp({ type: 'place.update', placementId, label: '  Goblin  ' })).toEqual({
+      type: 'place.update',
+      placementId,
+      label: 'Goblin',
+    });
+    expect(parseClientOp({ type: 'place.update', placementId, label: '' })).toEqual({
+      type: 'place.update',
+      placementId,
+      label: '',
+    });
+    expect(parseClientOp({ type: 'place.update', placementId, label: 4 })).toBeNull();
+    expect(parseClientOp({ type: 'place.update', placementId })).toBeNull();
+  });
+
   it('accepts a token folder and rejects a path that walks upward', () => {
     const assetId = '00000000-0000-4000-8000-000000000002';
     expect(parseClientOp({ type: 'asset.move', assetId, folder: 'Animals/Sea life' })).toEqual({

@@ -15,6 +15,7 @@ const own: Placement = {
   h: 64,
   rotation: 0,
   layer: 1,
+  label: '',
   owners: ['Ada'],
 };
 const other: Placement = { ...own, id: 'other', owners: ['Bea'] };
@@ -29,6 +30,8 @@ describe('permissions', () => {
     const ada = { role: 'player' as const, name: 'Ada' };
     expect(canPerform(ada, state, { type: 'place.update', placementId: 'own', x: 3, y: 4 })).toBe(true);
     expect(canPerform(ada, state, { type: 'place.update', placementId: 'own', rotation: 1 })).toBe(true);
+    expect(canPerform(ada, state, { type: 'place.update', placementId: 'own', label: 'Ada' })).toBe(true);
+    expect(canPerform(ada, state, { type: 'place.update', placementId: 'other', label: 'nope' })).toBe(false);
     expect(canPerform(ada, state, { type: 'place.update', placementId: 'own', w: 20 })).toBe(false);
     expect(canPerform(ada, state, { type: 'place.update', placementId: 'own', x: 1, layer: 2 })).toBe(false);
     expect(canPerform(ada, state, { type: 'place.update', placementId: 'other', x: 1 })).toBe(false);

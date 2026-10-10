@@ -97,4 +97,79 @@ describe('scene board persistence', () => {
     expect(db.loadRoom('ROOM12')?.state.scenes[0]?.mapFrame).toEqual(framed.mapFrame);
     db.close();
   });
+
+  it('persists a token label and fills a blank one on older rows', () => {
+    const file = tempFile();
+    const raw = new DatabaseSync(file);
+    raw.exec(`
+      CREATE TABLE rooms (
+        id TEXT PRIMARY KEY,
+        code TEXT NOT NULL UNIQUE,
+        dm_key_hash TEXT NOT NULL,
+        active_scene_id TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE scenes (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        map_asset_id TEXT,
+        background_asset_id TEXT,
+        background_color TEXT NOT NULL,
+        fog_enabled INTEGER NOT NULL,
+        sort_index INTEGER NOT NULL
+      );
+      CREATE TABLE placements (
+        id TEXT PRIMARY KEY,
+        scene_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        x REAL NOT NULL,
+        y REAL NOT NULL,
+        w REAL NOT NULL,
+        h REAL NOT NULL,
+        rotation REAL NOT NULL,
+        layer INTEGER NOT NULL,
+        owners TEXT NOT NULL
+      );
+    `);
+    raw.prepare('INSERT INTO rooms (id, code, dm_key_hash, active_scene_id, created_at) VALUES (?, ?, ?, ?, ?)').run('room', 'ROOM12', 'hash', 'scene-1', 1);
+    raw
+      .prepare(
+        `INSERT INTO scenes (id, room_id, name, map_asset_id, background_asset_id, background_color, fog_enabled, sort_index)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('scene-1', 'room', 'Scene 1', null, null, '#000000', 0, 0);
+    raw
+      .prepare(
+        `INSERT INTO placements (id, scene_id, asset_id, x, y, w, h, rotation, layer, owners)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('old', 'scene-1', 'asset', 0, 0, 64, 64, 0, 1, '[]');
+    raw.close();
+
+    const db = openDatabase(file);
+    expect(db.loadRoom('ROOM12')?.state.placements[0]?.label).toBe('');
+    const scene = blankScene('scene-1', 'Scene 1', 0);
+    const placement = {
+      id: 'old',
+      sceneId: scene.id,
+      assetId: 'asset',
+      x: 0,
+      y: 0,
+      w: 64,
+      h: 64,
+      rotation: 0,
+      layer: 1,
+      label: 'Goblin',
+      owners: [] as string[],
+    };
+    persistOps(
+      db.raw,
+      'room',
+      [{ type: 'place.upsert', placement }],
+      { code: 'ROOM12', activeSceneId: scene.id, assets: [], scenes: [scene], placements: [placement], fog: [] },
+    );
+    expect(db.loadRoom('ROOM12')?.state.placements[0]?.label).toBe('Goblin');
+    db.close();
+  });
 });

@@ -1,5 +1,5 @@
 import type { Asset, FogKind, FogMode, FogShape, ImageFrame, Placement, Point, Presence, Role, RoomState, Scene } from './types.js';
-import { cleanColor, cleanFolder, cleanOwners, cleanSceneName, finiteNumber, isId, isRecord, parseImageFrame } from './validate.js';
+import { cleanColor, cleanFolder, cleanLabel, cleanOwners, cleanSceneName, finiteNumber, isId, isRecord, parseImageFrame } from './validate.js';
 
 export interface SessionResponse {
   code: string;
@@ -38,6 +38,7 @@ export type ClientOp =
       h?: number;
       rotation?: number;
       layer?: number;
+      label?: string;
     }
   | { type: 'place.delete'; placementId: string }
   | { type: 'place.grant'; placementId: string; owners: string[] }
@@ -72,6 +73,7 @@ export type ServerOp =
       h?: number;
       rotation?: number;
       layer?: number;
+      label?: string;
       owners?: string[];
     }
   | { type: 'place.remove'; placementId: string }
@@ -220,7 +222,12 @@ export function parseClientOp(value: unknown): ClientOp | null {
         if (parsed === false) return null;
         if (parsed !== undefined) op[key] = parsed;
       }
-      return placeFields(op).length > 0 ? op : null;
+      if ('label' in value) {
+        const label = cleanLabel(value.label);
+        if (label === null) return null;
+        op.label = label;
+      }
+      return placeFields(op).length > 0 || op.label !== undefined ? op : null;
     }
     case 'place.delete':
       return isId(value.placementId) ? { type: 'place.delete', placementId: value.placementId } : null;

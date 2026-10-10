@@ -52,6 +52,8 @@ export interface Placement {
   h: number;
   rotation: number;
   layer: number;
+  /** Shown above the token. Empty until someone types one. */
+  label: string;
   owners: string[];
 }
 

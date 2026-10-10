@@ -18,7 +18,8 @@ export function canPerform(actor: Actor, state: RoomState, op: ClientOp): boolea
   const placement = state.placements.find((item) => item.id === op.placementId);
   if (!placement) return false;
   const fields = placeFields(op);
-  if (fields.length === 0) return false;
+  const setsLabel = op.label !== undefined;
+  if (fields.length === 0 && !setsLabel) return false;
   if (actor.role === 'dm') return true;
   if (!placement.owners.includes(actor.name)) return false;
   return fields.every((field) => PLAYER_MOVE_FIELDS.has(field));

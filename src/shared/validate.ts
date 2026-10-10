@@ -43,6 +43,11 @@ export function cleanAssetName(value: unknown): string {
   return cleaned || 'asset';
 }
 
+export function cleanLabel(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  return value.replace(/[\u0000-\u001f]/g, '').trim().slice(0, 40);
+}
+
 export function cleanColor(value: unknown): string | null {
   if (typeof value !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(value)) return null;
   return value.toLowerCase();

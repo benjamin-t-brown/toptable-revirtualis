@@ -10,7 +10,7 @@ import { hitPlacement } from '../../shared/hit.js';
 import type { Asset, AssetClass, FogMode, ImageFrame, Placement, Point, Presence, Role, RoomState } from '../../shared/types.js';
 import { ASSET_CLASSES, DEFAULT_TABLE_SIZE, MAX_TABLE_SIZE, MIN_TABLE_SIZE, sceneBoard } from '../../shared/types.js';
 import { assetFolder, folderSize, groupByFolder, type FolderNode } from '../../shared/tokenFolders.js';
-import { cleanName } from '../../shared/validate.js';
+import { cleanLabel, cleanName } from '../../shared/validate.js';
 import { fitBoard, screenToWorld, type Camera } from './camera.js';
 import { drawTable, type DraftBox, type Tool } from './draw.js';
 import { bindStage } from './input.js';
@@ -376,6 +376,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
       if (dragId && op.type === 'place.patch' && op.placementId === dragId) {
       const kept: Extract<ServerOp, { type: 'place.patch' }> = { type: 'place.patch', placementId: op.placementId };
       if (op.layer !== undefined) kept.layer = op.layer;
+      if (op.label !== undefined) kept.label = op.label;
       if (op.owners !== undefined) kept.owners = op.owners;
       room = applyServerOp(room, kept);
       return;
@@ -714,6 +715,11 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   };
 
   const renderInspector = (): void => {
+    const previousLabel = inspector.querySelector<HTMLInputElement>('input[data-kind="token-label"]');
+    const keepLabel =
+      previousLabel && document.activeElement === previousLabel
+        ? { value: previousLabel.value, caret: previousLabel.selectionStart ?? previousLabel.value.length }
+        : null;
     inspector.replaceChildren();
     const scenery = selectionId ? sceneryKind(selectionId) : null;
     if (scenery) {
@@ -738,6 +744,38 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     const title = document.createElement('strong');
     title.textContent = asset?.name ?? 'Piece';
     inspector.append(title);
+    const canEdit = controlsPlacement({ role, name: selfName }, placement.owners);
+    if (asset?.class === 'token' && canEdit) {
+      const field = document.createElement('label');
+      field.className = 'field';
+      field.append(document.createTextNode('Label'));
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.maxLength = 40;
+      input.placeholder = 'Name above the token';
+      input.dataset.kind = 'token-label';
+      input.setAttribute('aria-label', 'Token label');
+      input.value = keepLabel?.value ?? placement.label;
+      input.addEventListener('input', () => {
+        const label = cleanLabel(input.value);
+        if (label === null || label === placement.label) return;
+        placement.label = label;
+        send({ type: 'place.update', placementId: placement.id, label });
+        requestDraw();
+      });
+      input.addEventListener('blur', () => {
+        input.value = placement.label;
+      });
+      field.append(input);
+      inspector.append(field);
+      if (keepLabel) {
+        const caret = keepLabel.caret;
+        queueMicrotask(() => {
+          input.focus();
+          input.setSelectionRange(caret, caret);
+        });
+      }
+    }
     if (role !== 'dm') {
       const note = document.createElement('p');
       note.textContent = placement.owners.includes(selfName) ? 'You can move this.' : 'The DM controls this.';
@@ -1266,7 +1304,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     let structural = false;
     for (const op of message.ops) {
       if (op.type !== 'place.patch' && op.type !== 'sound.play') structural = true;
-      if (op.type === 'place.patch' && op.owners) structural = true;
+      if (op.type === 'place.patch' && (op.owners || op.label !== undefined)) structural = true;
       if (op.type === 'scene.activate') framedScene = null;
       applyIncoming(op);
     }

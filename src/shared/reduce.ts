@@ -212,6 +212,7 @@ function addPlacement(
     h: size,
     rotation: 0,
     layer,
+    label: '',
     owners: [],
   };
   return { ok: true, ops: [{ type: 'place.upsert', placement }] };
@@ -240,6 +241,7 @@ function copyPlacement(
     h: source.h,
     rotation: source.rotation,
     layer,
+    label: source.label,
     owners: source.owners.slice(),
   };
   return { ok: true, ops: [{ type: 'place.upsert', placement }] };
@@ -261,6 +263,7 @@ function patchPlacement(state: RoomState, op: Extract<ClientOp, { type: 'place.u
     patch.rotation = op.rotation;
   }
   if (op.layer !== undefined) patch.layer = clamp(Math.round(op.layer), -100000, 100000);
+  if (op.label !== undefined) patch.label = op.label;
   return { ok: true, ops: [patch] };
 }
 
@@ -353,6 +356,7 @@ export function applyServerOp(state: RoomState, op: ServerOp): RoomState {
       if (op.h !== undefined) placement.h = op.h;
       if (op.rotation !== undefined) placement.rotation = op.rotation;
       if (op.layer !== undefined) placement.layer = op.layer;
+      if (op.label !== undefined) placement.label = op.label;
       if (op.owners !== undefined) placement.owners = op.owners.slice();
       return { ...state, placements: upsert(state.placements, placement) };
     }

@@ -39,8 +39,8 @@ function upsertScene(db: DatabaseSync, roomId: string, scene: Scene): void {
 
 function upsertPlacement(db: DatabaseSync, placement: Placement): void {
   db.prepare(
-    `INSERT INTO placements (id, scene_id, asset_id, x, y, w, h, rotation, layer, owners)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO placements (id, scene_id, asset_id, x, y, w, h, rotation, layer, owners, label)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        scene_id = excluded.scene_id,
        asset_id = excluded.asset_id,
@@ -50,7 +50,8 @@ function upsertPlacement(db: DatabaseSync, placement: Placement): void {
        h = excluded.h,
        rotation = excluded.rotation,
        layer = excluded.layer,
-       owners = excluded.owners`,
+       owners = excluded.owners,
+       label = excluded.label`,
   ).run(
     placement.id,
     placement.sceneId,
@@ -62,6 +63,7 @@ function upsertPlacement(db: DatabaseSync, placement: Placement): void {
     placement.rotation,
     placement.layer,
     JSON.stringify(placement.owners),
+    placement.label,
   );
 }
 

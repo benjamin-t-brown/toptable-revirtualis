@@ -14,6 +14,7 @@ function piece(partial: Partial<Placement> = {}): Placement {
     h: 40,
     rotation: 0,
     layer: 1,
+    label: '',
     owners: [],
     ...partial,
   };

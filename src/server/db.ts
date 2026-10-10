@@ -126,7 +126,8 @@ CREATE TABLE IF NOT EXISTS placements (
   h REAL NOT NULL,
   rotation REAL NOT NULL,
   layer INTEGER NOT NULL,
-  owners TEXT NOT NULL
+  owners TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS fog_shapes (
   id TEXT PRIMARY KEY,
@@ -169,6 +170,11 @@ function ensureSceneBoardColumns(db: DatabaseSync): void {
   if (!names.has('background_frame')) db.exec('ALTER TABLE scenes ADD COLUMN background_frame TEXT');
 }
 
+function ensurePlacementLabelColumn(db: DatabaseSync): void {
+  const names = new Set(db.prepare('PRAGMA table_info(placements)').all().map((row) => text(row.name)));
+  if (!names.has('label')) db.exec("ALTER TABLE placements ADD COLUMN label TEXT NOT NULL DEFAULT ''");
+}
+
 function ensureAssetFileColumn(db: DatabaseSync): void {
   const names = new Set(db.prepare('PRAGMA table_info(assets)').all().map((row) => text(row.name)));
   if (!names.has('file_id')) db.exec('ALTER TABLE assets ADD COLUMN file_id TEXT');
@@ -185,6 +191,7 @@ export class AppDatabase {
     this.raw.exec('PRAGMA busy_timeout = 3000');
     this.raw.exec(SCHEMA);
     ensureSceneBoardColumns(this.raw);
+    ensurePlacementLabelColumn(this.raw);
     ensureAssetFileColumn(this.raw);
   }
 
@@ -298,7 +305,7 @@ export class AppDatabase {
       .map((row) => this.sceneRow(row));
     const placements = this.raw
       .prepare(
-        `SELECT id, scene_id, asset_id, x, y, w, h, rotation, layer, owners FROM placements
+        `SELECT id, scene_id, asset_id, x, y, w, h, rotation, layer, owners, label FROM placements
          WHERE scene_id IN (SELECT id FROM scenes WHERE room_id = ?)`,
       )
       .all(id)
@@ -352,6 +359,7 @@ export class AppDatabase {
       h: numberValue(row.h),
       rotation: numberValue(row.rotation),
       layer: numberValue(row.layer),
+      label: text(row.label),
       owners: parseStringArray(text(row.owners)),
     };
   }
