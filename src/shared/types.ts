@@ -27,6 +27,14 @@ export interface ImageFrame {
   rotation: number;
 }
 
+export type RulerUnit = 'ft' | 'm';
+
+export const DEFAULT_RULER_UNIT: RulerUnit = 'ft';
+/** Table pixels that equal one foot or one meter, until the DM sets a scene scale. */
+export const DEFAULT_RULER_SCALE = 1;
+export const MIN_RULER_SCALE = 0.01;
+export const MAX_RULER_SCALE = 100000;
+
 export interface Scene {
   id: string;
   name: string;
@@ -39,6 +47,9 @@ export interface Scene {
   fogEnabled: boolean;
   width: number;
   height: number;
+  /** Table pixels that equal one ruler unit. */
+  rulerScale: number;
+  rulerUnit: RulerUnit;
   sortIndex: number;
 }
 

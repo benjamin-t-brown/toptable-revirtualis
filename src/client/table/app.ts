@@ -3,18 +3,20 @@ import { connectSocket, type LiveSocket } from '../net.js';
 import { clearDmKeyPending, clearSession, dmKeyPending, saveSession, writeNotice, type Session } from '../session.js';
 import { themeButtonLabel, toggleTheme } from '../theme.js';
 import { prepareUpload } from '../upload.js';
+import { MARK_LIFE_MS, PING_LIFE_MS, type LivePing, type LiveStroke } from '../../shared/marks.js';
+import { rulerScaleFromSquare, type LiveRuler, type RulerSpan } from '../../shared/ruler.js';
 import type { ClientOp, ServerMsg, ServerOp } from '../../shared/protocol.js';
 import { controlsPlacement } from '../../shared/permissions.js';
 import { activeScene, applyServerOp } from '../../shared/reduce.js';
 import { hitPlacement } from '../../shared/hit.js';
-import type { Asset, AssetClass, FogMode, ImageFrame, Placement, Point, Presence, Role, RoomState } from '../../shared/types.js';
-import { ASSET_CLASSES, DEFAULT_TABLE_SIZE, MAX_TABLE_SIZE, MIN_TABLE_SIZE, sceneBoard } from '../../shared/types.js';
+import type { Asset, AssetClass, ImageFrame, Placement, Point, Presence, Role, RoomState, Scene } from '../../shared/types.js';
+import { ASSET_CLASSES, DEFAULT_RULER_SCALE, DEFAULT_TABLE_SIZE, MAX_RULER_SCALE, MAX_TABLE_SIZE, MIN_RULER_SCALE, MIN_TABLE_SIZE, sceneBoard } from '../../shared/types.js';
 import { assetFolder, folderSize, groupByFolder, type FolderNode } from '../../shared/tokenFolders.js';
 import { cleanLabel, cleanName } from '../../shared/validate.js';
-import { fitBoard, screenToWorld, type Camera } from './camera.js';
+import { fitBoard, screenToWorld, zoomAt, type Camera } from './camera.js';
 import { drawTable, type DraftBox, type Tool } from './draw.js';
 import { bindStage } from './input.js';
-import { BACKGROUND_SELECTION, frameOf, MAP_SELECTION, sceneryKind, sceneryPlacement, type SceneryKind } from './scenery.js';
+import { BACKGROUND_SELECTION, frameOf, imageAspect, MAP_SELECTION, sceneryKind, sceneryPlacement, type SceneryKind } from './scenery.js';
 
 const ASSET_LABELS: Record<AssetClass, string> = {
   map: 'Maps',
@@ -31,7 +33,15 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   let presence: Presence[] = [];
   let camera: Camera = { x: DEFAULT_TABLE_SIZE / 2, y: DEFAULT_TABLE_SIZE / 2, zoom: 0.15 };
   let tool: Tool = 'select';
-  let fogMode: FogMode = 'reveal';
+  let pings: LivePing[] = [];
+  let rulers: LiveRuler[] = [];
+  let rulerGesture: { id: string; sceneId: string } | null = null;
+  let calibrate: { span: RulerSpan; sceneId: string } | null = null;
+  let calibrateBox: { x: number; y: number; w: number; h: number } | null = null;
+  const quietRulers = new Set<string>();
+  let lastRulerSend = 0;
+  let marks: LiveStroke[] = [];
+  let ink: Point[] | null = null;
   let selectionId: string | null = null;
   let cursorWorld: Point | null = null;
   let placeAssetId: string | null = null;
@@ -39,7 +49,8 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   let sidebarWidth = readSidebarWidth();
   const openFolders = new Set<string>();
   const desktopSidebar = window.matchMedia('(min-width: 801px)');
-  let sidebarTab: 'scenes' | 'assets' = 'scenes';
+  let sidebarTab: 'scenes' | 'board' | 'assets' = 'scenes';
+  let viewSceneId: string | null = null;
   let polygon: Point[] = [];
   let polygonCursor: Point | null = null;
   let draft: DraftBox | null = null;
@@ -51,6 +62,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   let dpr = 1;
   let epoch = 0;
   let lastSend = 0;
+  let lastKeyZoom = 0;
   const images = new Map<string, ImageBitmap>();
   const loading = new Set<string>();
   const sounds: HTMLAudioElement[] = [];
@@ -71,9 +83,10 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   const themeBtn = button(themeButtonLabel());
   const helpBtn = button('Help');
   const keyBtn = button('DM key');
+  const exportBtn = button('Export room');
   const deleteBtn = button('Delete room');
   const leaveBtn = button('Leave');
-  bar.append(brand, roomLabel, who, sceneLabel, status, themeBtn, helpBtn, keyBtn, deleteBtn, leaveBtn);
+  bar.append(brand, roomLabel, who, sceneLabel, status, themeBtn, helpBtn, keyBtn, exportBtn, deleteBtn, leaveBtn);
 
   const workspace = document.createElement('div');
   workspace.className = 'workspace';
@@ -82,8 +95,9 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   const tabs = document.createElement('div');
   tabs.className = 'tabs tabs-main';
   const scenesTab = button('Scenes');
+  const boardTab = button('Board');
   const assetsTab = button('Assets');
-  tabs.append(scenesTab, assetsTab);
+  tabs.append(scenesTab, boardTab, assetsTab);
 
   const scenesPane = document.createElement('div');
   const newSceneBtn = button('New scene');
@@ -112,6 +126,37 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   fogCheck.type = 'checkbox';
   const fogList = document.createElement('div');
   fogList.className = 'list';
+  const rulerUnit = document.createElement('select');
+  for (const [value, label] of [
+    ['ft', 'Feet'],
+    ['m', 'Meters'],
+  ] as const) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    rulerUnit.append(option);
+  }
+  const rulerScale = document.createElement('input');
+  rulerScale.type = 'number';
+  rulerScale.min = String(MIN_RULER_SCALE);
+  rulerScale.max = String(MAX_RULER_SCALE);
+  rulerScale.step = 'any';
+  const rulerScaleCaption = document.createElement('span');
+  rulerScaleCaption.textContent = 'Pixels per ft';
+  const rulerScaleField = document.createElement('label');
+  rulerScaleField.className = 'field';
+  rulerScaleField.append(rulerScaleCaption, rulerScale);
+  const rulerHint = document.createElement('p');
+  rulerHint.className = 'hint';
+  rulerHint.textContent = 'Draw a square of a known size, or type how many table pixels equal one foot or meter.';
+  const calibrateRow = document.createElement('div');
+  calibrateRow.className = 'row';
+  const calibrateButtons = new Map<RulerSpan, HTMLButtonElement>();
+  for (const span of [5, 10, 50] as const) {
+    const control = button(`${span}×${span}`);
+    calibrateButtons.set(span, control);
+    calibrateRow.append(control);
+  }
   sceneFields.append(
     labeled('Scene name', sceneName),
     labeled('Width', widthInput),
@@ -119,6 +164,10 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     labeled('Map', mapSelect),
     labeled('Background', bgSelect),
     labeled('Table color', colorInput),
+    labeled('Ruler unit', rulerUnit),
+    rulerScaleField,
+    calibrateRow,
+    rulerHint,
     labeledCheck('Fog', fogCheck),
     fogList,
   );
@@ -126,8 +175,16 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   people.className = 'list';
   const playerHint = document.createElement('p');
   playerHint.className = 'hint';
-  playerHint.textContent = 'Drag empty space to pan. Scroll or pinch to zoom. You can move tokens assigned to your name.';
+  playerHint.textContent = 'Drag empty space to pan, or hold Space and move the pointer. Scroll, pinch, or press = and - to zoom. You can move tokens assigned to your name.';
   scenesPane.append(newSceneBtn, sceneList, sceneFields, playerHint, heading('People'), people);
+
+  const boardPane = document.createElement('div');
+  const boardHint = document.createElement('p');
+  boardHint.className = 'hint';
+  boardHint.textContent = 'Players see the scene selected here. A scene opened under Scenes stays on your table only.';
+  const boardList = document.createElement('div');
+  boardList.className = 'list';
+  boardPane.append(boardHint, boardList);
 
   const assetsPane = document.createElement('div');
   const classTabs = document.createElement('div');
@@ -144,7 +201,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   assetsPane.append(classTabs, uploadBtn, assetFilter, assetList);
   const inspector = document.createElement('div');
   inspector.className = 'inspector';
-  sidebar.append(tabs, scenesPane, assetsPane, inspector);
+  sidebar.append(tabs, scenesPane, boardPane, assetsPane, inspector);
   const resizeHandle = document.createElement('div');
   resizeHandle.className = 'sidebar-resize';
   resizeHandle.tabIndex = 0;
@@ -164,6 +221,9 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   for (const [id, label] of [
     ['select', 'Select'],
     ['pan', 'Pan'],
+    ['ping', 'Ping'],
+    ['draw', 'Draw'],
+    ['ruler', 'Ruler'],
     ['polygon', 'Polygon'],
     ['rect', 'Square'],
     ['ellipse', 'Circle'],
@@ -174,9 +234,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     toolbar.append(control);
   }
   const resetBtn = button('Reset view');
-  const fogModeSelect = document.createElement('select');
-  fogModeSelect.innerHTML = '<option value="reveal">Reveal</option><option value="cover">Cover</option>';
-  toolbar.append(resetBtn, fogModeSelect);
+  toolbar.append(resetBtn);
   stage.append(canvas, toolbar);
   workspace.append(sidebar, resizeHandle, stage);
   const applySidebarWidth = (): void => {
@@ -231,9 +289,10 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   const phonebar = document.createElement('nav');
   phonebar.className = 'phonebar';
   const phoneScenes = button('Scenes');
+  const phoneBoard = button('Board');
   const phoneAssets = button('Assets');
   const phoneClose = button('Close');
-  phonebar.append(phoneScenes, phoneAssets, phoneClose);
+  phonebar.append(phoneScenes, phoneBoard, phoneAssets, phoneClose);
   shell.append(bar, workspace, phonebar);
   root.replaceChildren(shell);
 
@@ -252,6 +311,13 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
 
   const paint = (): void => {
     if (!ctx || !fogCtx || !room) return;
+    const now = Date.now();
+    const live =
+      ink !== null ||
+      pings.some((ping) => now - ping.at < PING_LIFE_MS) ||
+      marks.some((mark) => now - mark.at < MARK_LIFE_MS);
+    pings = pings.filter((ping) => now - ping.at < PING_LIFE_MS);
+    marks = marks.filter((mark) => now - mark.at < MARK_LIFE_MS);
     drawTable(ctx, fogCtx, fogCanvas, {
       room,
       role,
@@ -263,14 +329,46 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
       polygon,
       polygonCursor,
       draft,
+      pings,
+      marks,
+      rulers,
+      calibrate:
+        calibrate && calibrateBox
+          ? {
+              span: calibrate.span,
+              unit: shownScene()?.rulerUnit === 'm' ? 'm' : 'ft',
+              ...calibrateBox,
+            }
+          : null,
+      ink,
+      now,
+      sceneId: shownScene()?.id ?? null,
       width: cssWidth,
       height: cssHeight,
       dpr,
     });
+    if (live) requestDraw();
   };
 
   const send = (op: ClientOp): void => {
     socket.send({ type: 'op', op });
+  };
+
+  const endRuler = (): void => {
+    if (!rulerGesture) return;
+    const id = rulerGesture.id;
+    rulerGesture = null;
+    quietRulers.add(id);
+    rulers = rulers.filter((item) => item.id !== id);
+    send({ type: 'ruler.clear', id });
+    requestDraw();
+  };
+
+  const cancelCalibrate = (): void => {
+    if (!calibrate && !calibrateBox) return;
+    calibrate = null;
+    calibrateBox = null;
+    requestDraw();
   };
 
   const setStatus = (text: string): void => {
@@ -280,7 +378,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   const selected = (): Placement | null => (selectionId ? pieceFor(selectionId) : null);
 
   const scenePlacements = (): Placement[] => {
-    const scene = room ? activeScene(room) : null;
+    const scene = shownScene();
     if (!scene || !room) return [];
     return room.placements.filter((item) => item.sceneId === scene.id);
   };
@@ -333,6 +431,15 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
       .catch(() => loading.delete(id));
   };
 
+  const shownScene = (): Scene | null => {
+    if (!room) return null;
+    if (role === 'dm' && viewSceneId) {
+      const editing = room.scenes.find((scene) => scene.id === viewSceneId);
+      if (editing) return editing;
+    }
+    return activeScene(room);
+  };
+
   const ensureImages = (): void => {
     if (!room) return;
     const liveIds = new Set<string>();
@@ -352,7 +459,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
 
   const frameScene = (): void => {
     if (viewLocked || !room || cssWidth < 2) return;
-    const scene = activeScene(room);
+    const scene = shownScene();
     if (!scene || framedScene === scene.id) return;
     const board = sceneBoard(scene);
     camera = fitBoard(cssWidth, cssHeight, board.width, board.height);
@@ -371,6 +478,46 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     if (!room) return;
     if (op.type === 'sound.play') {
       playSound(op.assetId);
+      return;
+    }
+    if (op.type === 'ping') {
+      if (!pings.some((ping) => ping.id === op.id)) {
+        pings.push({ id: op.id, sceneId: op.sceneId, x: op.x, y: op.y, name: op.name, at: Date.now() });
+      }
+      return;
+    }
+    if (op.type === 'mark') {
+      if (!marks.some((mark) => mark.id === op.id)) {
+        marks.push({
+          id: op.id,
+          sceneId: op.sceneId,
+          points: op.points.map((point) => ({ x: point.x, y: point.y })),
+          at: Date.now(),
+        });
+      }
+      return;
+    }
+    if (op.type === 'ruler') {
+      if (quietRulers.has(op.id) || rulerGesture?.id === op.id) return;
+      const next: LiveRuler = {
+        id: op.id,
+        sceneId: op.sceneId,
+        x: op.x,
+        y: op.y,
+        x2: op.x2,
+        y2: op.y2,
+        name: op.name,
+      };
+      const index = rulers.findIndex((item) => item.id === next.id);
+      if (index >= 0) rulers[index] = next;
+      else rulers.push(next);
+      requestDraw();
+      return;
+    }
+    if (op.type === 'ruler.clear') {
+      quietRulers.delete(op.id);
+      rulers = rulers.filter((item) => item.id !== op.id);
+      requestDraw();
       return;
     }
       if (dragId && op.type === 'place.patch' && op.placementId === dragId) {
@@ -410,7 +557,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   const pieceFor = (id: string): Placement | null => {
     const kind = sceneryKind(id);
     if (!kind || !room) return room?.placements.find((item) => item.id === id) ?? null;
-    const scene = activeScene(room);
+    const scene = shownScene();
     return scene ? sceneryPlacement(scene, kind, images) : null;
   };
 
@@ -421,13 +568,13 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
       if (!room.placements.some((item) => item.id === selectionId)) selectionId = null;
       return;
     }
-    const scene = activeScene(room);
+    const scene = shownScene();
     const piece = scene ? sceneryPlacement(scene, kind, images) : null;
     if (!piece || !sceneryEditable(kind)) selectionId = null;
   };
 
   const sendScenery = (id: string, frame: ImageFrame, force: boolean): void => {
-    const scene = room ? activeScene(room) : null;
+    const scene = shownScene();
     const kind = sceneryKind(id);
     if (!scene || !kind) return;
     if (kind === 'map') scene.mapFrame = frame;
@@ -444,51 +591,107 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     keepSelection();
     const dm = role === 'dm';
     who.textContent = `${selfName} (${role})`;
-    const scene = room ? activeScene(room) : null;
-    sceneLabel.textContent = scene ? scene.name : 'No scene';
+    const scene = shownScene();
+    if (calibrate && scene?.id !== calibrate.sceneId) {
+      calibrate = null;
+      calibrateBox = null;
+      setStatus('');
+    }
+    const live = room ? activeScene(room) : null;
+    if (dm && scene && live && scene.id !== live.id) sceneLabel.textContent = `${scene.name} · board ${live.name}`;
+    else sceneLabel.textContent = scene ? scene.name : 'No scene';
     keyBtn.hidden = !dm || !session.dmKey;
+    exportBtn.hidden = !dm;
     deleteBtn.hidden = !dm;
     assetsTab.hidden = !dm;
+    boardTab.hidden = !dm;
+    phoneBoard.hidden = !dm;
     phoneAssets.hidden = !dm;
+    if (!dm && sidebarTab === 'board') sidebarTab = 'scenes';
     newSceneBtn.hidden = !dm;
     sceneFields.hidden = !dm;
     playerHint.hidden = dm;
-    fogModeSelect.hidden = !dm;
+    const fogOn = dm && Boolean(scene?.fogEnabled);
+    if (!fogOn && (tool === 'polygon' || tool === 'rect' || tool === 'ellipse')) {
+      tool = 'select';
+      polygon = [];
+      polygonCursor = null;
+      draft = null;
+    }
     for (const id of ['polygon', 'rect', 'ellipse'] as const) {
       const control = toolButtons[id];
-      if (control) control.hidden = !dm;
+      if (control) control.hidden = !fogOn;
     }
     stage.dataset.tool = tool;
+    stage.dataset.calibrate = calibrate ? '1' : '';
     for (const [id, control] of Object.entries(toolButtons)) {
       control?.setAttribute('aria-pressed', id === tool ? 'true' : 'false');
     }
     scenesPane.hidden = sidebarTab !== 'scenes';
+    boardPane.hidden = sidebarTab !== 'board' || !dm;
     assetsPane.hidden = sidebarTab !== 'assets' || !dm;
     scenesTab.setAttribute('aria-pressed', sidebarTab === 'scenes' ? 'true' : 'false');
+    boardTab.setAttribute('aria-pressed', sidebarTab === 'board' ? 'true' : 'false');
     assetsTab.setAttribute('aria-pressed', sidebarTab === 'assets' ? 'true' : 'false');
 
+    sceneList.hidden = !dm;
     sceneList.replaceChildren();
-    if (room) {
+    if (dm && room) {
       const scenes = room.scenes.slice().sort((a, b) => a.sortIndex - b.sortIndex);
       for (const item of scenes) {
         const row = document.createElement('div');
-        row.className = 'row';
+        row.className = 'row scene-row';
         const open = button(item.name);
-        if (item.id === room.activeSceneId) open.className = 'active';
+        open.className = 'scene-name';
+        if (item.id === scene?.id) open.classList.add('active');
+        if (item.id === room.activeSceneId) open.title = 'On the board';
         open.addEventListener('click', () => {
-          if (dm && item.id !== room?.activeSceneId) send({ type: 'scene.activate', sceneId: item.id });
+          if (!dm || item.id === viewSceneId) return;
+          viewSceneId = item.id;
+          framedScene = null;
+          selectionId = null;
+          frameScene();
+          render();
+          requestDraw();
         });
         row.append(open);
         if (dm) {
-          const copy = button('Copy');
+          const actions = document.createElement('span');
+          actions.className = 'scene-actions';
+          const copy = button('c');
+          copy.className = 'icon-x';
+          copy.setAttribute('aria-label', `Copy ${item.name}`);
+          copy.title = 'Copy';
           copy.addEventListener('click', () => send({ type: 'scene.duplicate', sceneId: item.id }));
-          const remove = button('Delete');
+          const remove = button('×');
+          remove.className = 'icon-x';
+          remove.setAttribute('aria-label', `Delete ${item.name}`);
+          remove.title = 'Delete';
           remove.addEventListener('click', () => {
             if (confirm(`Delete ${item.name}?`)) send({ type: 'scene.delete', sceneId: item.id });
           });
-          row.append(copy, remove);
+          actions.append(copy, remove);
+          row.append(actions);
         }
         sceneList.append(row);
+      }
+    }
+
+    boardList.replaceChildren();
+    if (dm && room) {
+      const scenes = room.scenes.slice().sort((a, b) => a.sortIndex - b.sortIndex);
+      for (const item of scenes) {
+        const open = button(item.name);
+        open.className = 'scene-name';
+        if (item.id === room.activeSceneId) open.classList.add('active');
+        open.addEventListener('click', () => {
+          if (item.id === room?.activeSceneId) return;
+          send({ type: 'scene.activate', sceneId: item.id });
+        });
+        const row = document.createElement('div');
+        row.className = 'row scene-row';
+        row.append(open);
+        boardList.append(row);
       }
     }
 
@@ -499,24 +702,37 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     if (scene && document.activeElement !== widthInput) widthInput.value = String(sceneBoard(scene).width);
     if (scene && document.activeElement !== heightInput) heightInput.value = String(sceneBoard(scene).height);
     fogCheck.checked = scene?.fogEnabled ?? false;
+    const unit = scene?.rulerUnit === 'm' ? 'm' : 'ft';
+    rulerScaleCaption.textContent = unit === 'm' ? 'Pixels per m' : 'Pixels per ft';
+    if (scene && document.activeElement !== rulerUnit) rulerUnit.value = unit;
+    if (scene && document.activeElement !== rulerScale) rulerScale.value = String(scene.rulerScale ?? DEFAULT_RULER_SCALE);
+    const unitName = unit === 'm' ? 'meters' : 'feet';
+    for (const [span, control] of calibrateButtons) {
+      control.setAttribute('aria-pressed', calibrate?.span === span ? 'true' : 'false');
+      control.title = `Draw a ${span} by ${span} ${unitName} square`;
+    }
 
+    fogList.hidden = !(dm && scene?.fogEnabled);
     fogList.replaceChildren();
-    if (dm && scene && room) {
+    if (dm && scene?.fogEnabled && room) {
+      const shapeName = { polygon: 'Polygon', rect: 'Square', ellipse: 'Circle' } as const;
       for (const shape of room.fog.filter((item) => item.sceneId === scene.id)) {
         const row = document.createElement('div');
-        row.className = 'row';
+        row.className = 'row scene-row';
         const label = document.createElement('span');
-        label.textContent = `${shape.kind} ${shape.mode}`;
-        const remove = button('Delete');
+        label.className = 'scene-name';
+        label.textContent = shapeName[shape.kind];
+        const remove = button('×');
+        remove.className = 'icon-x';
+        remove.setAttribute('aria-label', `Delete ${shapeName[shape.kind]}`);
+        remove.title = 'Delete';
         remove.addEventListener('click', () => send({ type: 'fog.delete', shapeId: shape.id }));
         row.append(label, remove);
         fogList.append(row);
       }
-      if (scene.fogEnabled) {
-        const clear = button('Clear fog shapes');
-        clear.addEventListener('click', () => send({ type: 'fog.clear', sceneId: scene.id }));
-        fogList.append(clear);
-      }
+      const clear = button('Clear fog shapes');
+      clear.addEventListener('click', () => send({ type: 'fog.clear', sceneId: scene.id }));
+      fogList.append(clear);
     }
 
     people.replaceChildren();
@@ -677,7 +893,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     if (role === 'dm' && asset.class === 'map') {
       const use = button('Use map');
       use.addEventListener('click', () => {
-        const scene = room ? activeScene(room) : null;
+        const scene = shownScene();
         if (scene) {
           send({ type: 'scene.update', sceneId: scene.id, mapAssetId: asset.id });
           setStatus(sceneryHint('map'));
@@ -688,7 +904,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     if (role === 'dm' && asset.class === 'background') {
       const use = button('Use background');
       use.addEventListener('click', () => {
-        const scene = room ? activeScene(room) : null;
+        const scene = shownScene();
         if (scene) {
           send({ type: 'scene.update', sceneId: scene.id, backgroundAssetId: asset.id });
           setStatus(sceneryHint('background'));
@@ -852,13 +1068,13 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   };
 
   const commitPolygon = (): void => {
-    const scene = room ? activeScene(room) : null;
+    const scene = shownScene();
     if (!scene || polygon.length < 3) return;
     send({
       type: 'fog.add',
       sceneId: scene.id,
       kind: 'polygon',
-      mode: fogMode,
+      mode: 'reveal',
       points: polygon.map((point) => ({ ...point })),
       x: 0,
       y: 0,
@@ -903,11 +1119,12 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     canResize: () => role === 'dm',
     canRotate: (placement) => controlsPlacement({ role, name: selfName }, placement.owners),
     maxSize: (placement) => (sceneryKind(placement.id) ? MAX_TABLE_SIZE : 8000),
+    imageAspect: (placement) => imageAspect(images.get(placement.assetId)),
     sceneryAt: (world) => {
       if (role !== 'dm' || tool !== 'select' || sidebarTab !== 'assets' || !room) return null;
       const kind: SceneryKind | null = assetTab === 'map' || assetTab === 'background' ? assetTab : null;
       if (!kind) return null;
-      const scene = activeScene(room);
+      const scene = shownScene();
       if (!scene) return null;
       const piece = sceneryPlacement(scene, kind, images);
       if (!piece || !hitPlacement(piece, world.x, world.y)) return null;
@@ -915,26 +1132,109 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     },
     placing: () => placeAssetId !== null,
     onPlace: (world) => {
-      const scene = room ? activeScene(room) : null;
+      const scene = shownScene();
       if (!scene || !placeAssetId) return;
       send({ type: 'place.add', sceneId: scene.id, assetId: placeAssetId, x: world.x, y: world.y });
       placeAssetId = null;
       setStatus('');
       render();
     },
+    onPing: (world) => {
+      const scene = shownScene();
+      if (!scene) return;
+      const id = crypto.randomUUID();
+      pings.push({ id, sceneId: scene.id, x: world.x, y: world.y, name: selfName, at: Date.now() });
+      send({ type: 'ping', id, sceneId: scene.id, x: world.x, y: world.y });
+      requestDraw();
+    },
+    onInk: (points) => {
+      ink = points;
+      requestDraw();
+    },
+    onInkEnd: (points) => {
+      ink = null;
+      const scene = shownScene();
+      if (!scene || points.length < 2) {
+        requestDraw();
+        return;
+      }
+      const id = crypto.randomUUID();
+      const stroke = points.map((point) => ({ x: point.x, y: point.y }));
+      marks.push({ id, sceneId: scene.id, points: stroke, at: Date.now() });
+      send({ type: 'mark', id, sceneId: scene.id, points: stroke });
+      requestDraw();
+    },
+    onRuler: (line) => {
+      if (!line) {
+        endRuler();
+        return;
+      }
+      if (!rulerGesture) {
+        const scene = shownScene();
+        if (!scene) return;
+        rulerGesture = { id: crypto.randomUUID(), sceneId: scene.id };
+      }
+      const next: LiveRuler = {
+        id: rulerGesture.id,
+        sceneId: rulerGesture.sceneId,
+        x: line.x,
+        y: line.y,
+        x2: line.x2,
+        y2: line.y2,
+        name: selfName,
+      };
+      const index = rulers.findIndex((item) => item.id === next.id);
+      const first = index < 0;
+      if (index >= 0) rulers[index] = next;
+      else rulers.push(next);
+      requestDraw();
+      const now = performance.now();
+      if (!first && now - lastRulerSend < 50) return;
+      lastRulerSend = now;
+      send({ type: 'ruler', id: next.id, sceneId: next.sceneId, x: next.x, y: next.y, x2: next.x2, y2: next.y2 });
+    },
+    calibrating: () => calibrate !== null,
+    onCalibrateDraft: (box) => {
+      calibrateBox = box;
+      requestDraw();
+    },
+    onCalibrate: (box) => {
+      const pending = calibrate;
+      const scene = shownScene();
+      calibrate = null;
+      calibrateBox = null;
+      if (!pending || !scene || scene.id !== pending.sceneId) {
+        render();
+        requestDraw();
+        return;
+      }
+      const scale = rulerScaleFromSquare(box.w, pending.span);
+      if (scale === null) {
+        setStatus('Draw a larger square.');
+        render();
+        requestDraw();
+        return;
+      }
+      scene.rulerScale = scale;
+      send({ type: 'scene.update', sceneId: scene.id, rulerScale: scale });
+      const unitLabel = scene.rulerUnit === 'm' ? 'm' : 'ft';
+      setStatus(`Scale set from a ${pending.span}×${pending.span} ${unitLabel} square.`);
+      render();
+      requestDraw();
+    },
     onDraft: (next) => {
       draft = next;
       requestDraw();
     },
     onFogBox: (box) => {
-      const scene = room ? activeScene(room) : null;
+      const scene = shownScene();
       draft = null;
       if (!scene) return;
       send({
         type: 'fog.add',
         sceneId: scene.id,
         kind: box.kind,
-        mode: fogMode,
+        mode: 'reveal',
         points: [],
         x: box.x,
         y: box.y,
@@ -997,13 +1297,39 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   const onKey = (event: KeyboardEvent): void => {
     const target = event.target;
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
-    if (event.key === 'Escape') {
+    if ((event.key === '=' || event.key === '+' || event.key === '-' || event.key === '_') && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      const now = performance.now();
+      if (event.repeat && now - lastKeyZoom < 50) return;
+      lastKeyZoom = now;
+      const zoomIn = event.key === '=' || event.key === '+';
+      const step = event.repeat ? 1.04 : 1.1;
+      const factor = zoomIn ? step : 1 / step;
+      camera = zoomAt(camera, cssWidth, cssHeight, cssWidth / 2, cssHeight / 2, factor);
+      requestDraw();
+    } else if (event.key === 'Escape') {
+      tool = 'select';
       polygon = [];
       polygonCursor = null;
       draft = null;
+      ink = null;
+      endRuler();
+      cancelCalibrate();
       placeAssetId = null;
       selectionId = null;
       setStatus('');
+      render();
+      requestDraw();
+    } else if (event.key.toLowerCase() === 's' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.repeat) {
+      event.preventDefault();
+      tool = 'select';
+      polygon = [];
+      polygonCursor = null;
+      draft = null;
+      ink = null;
+      endRuler();
+      cancelCalibrate();
+      if (!placeAssetId) setStatus('');
       render();
       requestDraw();
     } else if (event.key === 'Enter' && tool === 'polygon') {
@@ -1014,7 +1340,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
       requestDraw();
     } else if (event.key.toLowerCase() === 'c' && !event.ctrlKey && !event.metaKey && !event.altKey && role === 'dm') {
       const piece = selected();
-      const scene = room ? activeScene(room) : null;
+      const scene = shownScene();
       if (!piece || sceneryKind(piece.id) || !scene || piece.sceneId !== scene.id) return;
       if (!cursorWorld) {
         setStatus('Point at the table, then press C.');
@@ -1097,6 +1423,27 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     );
   };
   keyBtn.addEventListener('click', () => showDmKey(false));
+  exportBtn.addEventListener('click', () => {
+    exportBtn.disabled = true;
+    void fetch(`/api/rooms/${session.code}/export`, { headers: { authorization: `Bearer ${session.token}` } })
+      .then(async (response) => {
+        if (!response.ok) {
+          setStatus('Could not export the room.');
+          return;
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `toptable-${session.code}.zip`;
+        link.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch(() => setStatus('Could not export the room.'))
+      .finally(() => {
+        exportBtn.disabled = false;
+      });
+  });
   if (dmKeyPending(session.code)) showDmKey(true);
   deleteBtn.addEventListener('click', () => {
     if (!confirm('Delete this room and its files?')) return;
@@ -1127,29 +1474,29 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     send({ type: 'scene.create', name: `Scene ${count}` });
   });
   sceneName.addEventListener('change', () => {
-    const scene = room ? activeScene(room) : null;
+    const scene = shownScene();
     if (!scene || scene.name === sceneName.value) return;
     send({ type: 'scene.update', sceneId: scene.id, name: sceneName.value });
   });
   mapSelect.addEventListener('change', () => {
-    const scene = room ? activeScene(room) : null;
+    const scene = shownScene();
     if (!scene) return;
     send({ type: 'scene.update', sceneId: scene.id, mapAssetId: mapSelect.value || null });
     if (mapSelect.value) setStatus(sceneryHint('map'));
   });
   bgSelect.addEventListener('change', () => {
-    const scene = room ? activeScene(room) : null;
+    const scene = shownScene();
     if (!scene) return;
     send({ type: 'scene.update', sceneId: scene.id, backgroundAssetId: bgSelect.value || null });
     if (bgSelect.value) setStatus(sceneryHint('background'));
   });
   colorInput.addEventListener('change', () => {
-    const scene = room ? activeScene(room) : null;
+    const scene = shownScene();
     if (!scene) return;
     send({ type: 'scene.update', sceneId: scene.id, backgroundColor: colorInput.value });
   });
   const commitBoardEdge = (axis: 'width' | 'height', input: HTMLInputElement): void => {
-    const scene = room ? activeScene(room) : null;
+    const scene = shownScene();
     if (!scene) return;
     const current = sceneBoard(scene)[axis];
     const parsed = Number(input.value);
@@ -1166,23 +1513,62 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   widthInput.addEventListener('change', () => commitBoardEdge('width', widthInput));
   heightInput.addEventListener('change', () => commitBoardEdge('height', heightInput));
   fogCheck.addEventListener('change', () => {
-    const scene = room ? activeScene(room) : null;
+    const scene = shownScene();
     if (!scene) return;
     send({ type: 'scene.update', sceneId: scene.id, fogEnabled: fogCheck.checked });
   });
-  fogModeSelect.addEventListener('change', () => {
-    fogMode = fogModeSelect.value === 'cover' ? 'cover' : 'reveal';
+  rulerUnit.addEventListener('change', () => {
+    const scene = shownScene();
+    if (!scene) return;
+    const unit = rulerUnit.value === 'm' ? 'm' : 'ft';
+    if (unit === scene.rulerUnit) return;
+    send({ type: 'scene.update', sceneId: scene.id, rulerUnit: unit });
   });
+  rulerScale.addEventListener('change', () => {
+    const scene = shownScene();
+    if (!scene) return;
+    const parsed = Number(rulerScale.value);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      rulerScale.value = String(scene.rulerScale);
+      return;
+    }
+    if (parsed === scene.rulerScale) return;
+    send({ type: 'scene.update', sceneId: scene.id, rulerScale: parsed });
+  });
+  for (const [span, control] of calibrateButtons) {
+    control.addEventListener('click', () => {
+      const scene = shownScene();
+      if (!scene) return;
+      if (calibrate?.span === span && calibrate.sceneId === scene.id) {
+        cancelCalibrate();
+        setStatus('');
+        render();
+        return;
+      }
+      calibrate = { span, sceneId: scene.id };
+      calibrateBox = null;
+      const unitLabel = scene.rulerUnit === 'm' ? 'm' : 'ft';
+      setStatus(`Drag a square that covers ${span}×${span} ${unitLabel}. Press Esc to cancel.`);
+      render();
+      requestDraw();
+    });
+  }
   for (const [id, control] of Object.entries(toolButtons)) {
     control?.addEventListener('click', () => {
       tool = id as Tool;
+      cancelCalibrate();
       if (tool !== 'polygon') {
         polygon = [];
         polygonCursor = null;
       }
+      if (tool !== 'draw') ink = null;
+      if (tool !== 'ruler') endRuler();
       if (tool === 'polygon') setStatus('Click to add points. Click the first point to close.');
       else if (tool === 'rect') setStatus('Drag a rectangle. Hold Shift for a square.');
       else if (tool === 'ellipse') setStatus('Drag an oval. Hold Shift for a circle.');
+      else if (tool === 'ping') setStatus('Click the table to ping. It holds for 2 seconds, then fades out.');
+      else if (tool === 'draw') setStatus('Drag to draw. Lines hold for 3 seconds, then fade out.');
+      else if (tool === 'ruler') setStatus('Drag to measure. The line shows the distance while you hold.');
       else if (!placeAssetId) setStatus('');
       render();
       requestDraw();
@@ -1239,6 +1625,12 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     render();
     requestDraw();
   });
+  boardTab.addEventListener('click', () => {
+    sidebarTab = 'board';
+    sidebar.classList.add('open');
+    render();
+    requestDraw();
+  });
   assetsTab.addEventListener('click', () => {
     sidebarTab = 'assets';
     sidebar.classList.add('open');
@@ -1247,6 +1639,12 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
   });
   phoneScenes.addEventListener('click', () => {
     sidebarTab = 'scenes';
+    sidebar.classList.add('open');
+    render();
+    requestDraw();
+  });
+  phoneBoard.addEventListener('click', () => {
+    sidebarTab = 'board';
     sidebar.classList.add('open');
     render();
     requestDraw();
@@ -1272,6 +1670,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
       session.role = role;
       session.name = selfName;
       saveSession(session);
+      if (role !== 'dm' || !viewSceneId || !room.scenes.some((scene) => scene.id === viewSceneId)) viewSceneId = role === 'dm' ? room.activeSceneId : null;
       keepSelection();
       ensureImages();
       frameScene();
@@ -1290,6 +1689,7 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
       if (message.snapshot) {
         room = message.snapshot.state;
         presence = message.snapshot.presence;
+        if (role !== 'dm' || !viewSceneId || !room.scenes.some((scene) => scene.id === viewSceneId)) viewSceneId = role === 'dm' ? room.activeSceneId : null;
         ensureImages();
         render();
         requestDraw();
@@ -1303,9 +1703,17 @@ export function mountTable(root: HTMLElement, session: Session): () => void {
     if (message.type !== 'ops' || !room) return;
     let structural = false;
     for (const op of message.ops) {
-      if (op.type !== 'place.patch' && op.type !== 'sound.play') structural = true;
+      if (op.type !== 'place.patch' && op.type !== 'sound.play' && op.type !== 'ping' && op.type !== 'mark' && op.type !== 'ruler' && op.type !== 'ruler.clear') structural = true;
       if (op.type === 'place.patch' && (op.owners || op.label !== undefined)) structural = true;
-      if (op.type === 'scene.activate') framedScene = null;
+      if (op.type === 'scene.upsert' && role === 'dm' && !room.scenes.some((scene) => scene.id === op.scene.id)) {
+        viewSceneId = op.scene.id;
+        framedScene = null;
+      }
+      if (op.type === 'scene.remove' && op.sceneId === viewSceneId) {
+        viewSceneId = null;
+        framedScene = null;
+      }
+      if (op.type === 'scene.activate' && role !== 'dm') framedScene = null;
       applyIncoming(op);
     }
     keepSelection();

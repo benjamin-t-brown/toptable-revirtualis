@@ -1,7 +1,16 @@
 import type { ClientOp, ServerOp } from './protocol.js';
 import type { Asset, FogShape, Placement, RoomState, Scene } from './types.js';
-import { DEFAULT_TABLE_COLOR, DEFAULT_TABLE_SIZE, MAX_TABLE_SIZE, MIN_TABLE_SIZE } from './types.js';
-import { clamp } from './validate.js';
+import {
+  DEFAULT_RULER_SCALE,
+  DEFAULT_RULER_UNIT,
+  DEFAULT_TABLE_COLOR,
+  DEFAULT_TABLE_SIZE,
+  MAX_RULER_SCALE,
+  MAX_TABLE_SIZE,
+  MIN_RULER_SCALE,
+  MIN_TABLE_SIZE,
+} from './types.js';
+import { clamp, cleanName } from './validate.js';
 
 export interface IdSource {
   next(): string;
@@ -27,12 +36,26 @@ export function blankScene(id: string, name: string, sortIndex: number): Scene {
     fogEnabled: false,
     width: DEFAULT_TABLE_SIZE,
     height: DEFAULT_TABLE_SIZE,
+    rulerScale: DEFAULT_RULER_SCALE,
+    rulerUnit: DEFAULT_RULER_UNIT,
     sortIndex,
   };
 }
 
 export function activeScene(state: RoomState): Scene | null {
   return state.scenes.find((scene) => scene.id === state.activeSceneId) ?? null;
+}
+
+function indicate(
+  state: RoomState,
+  sceneId: string,
+  by: string,
+  op: Extract<ServerOp, { type: 'ping' | 'mark' | 'ruler' }>,
+): MaterializeResult {
+  if (!state.scenes.some((scene) => scene.id === sceneId)) return { ok: false, error: 'Scene not found' };
+  const name = cleanName(by);
+  if (!name) return { ok: false, error: 'Not allowed' };
+  return { ok: true, ops: [{ ...op, name }] };
 }
 
 function nextSort(items: readonly { sortIndex: number }[]): number {
@@ -46,18 +69,12 @@ function copyName(name: string): string {
   return next.length > 40 ? next.slice(0, 40) : next;
 }
 
-export function materialize(state: RoomState, op: ClientOp, ids: IdSource): MaterializeResult {
+export function materialize(state: RoomState, op: ClientOp, ids: IdSource, by = ''): MaterializeResult {
   switch (op.type) {
     case 'scene.create': {
       if (state.scenes.length >= MAX_SCENES) return { ok: false, error: 'Too many scenes' };
       const scene = blankScene(ids.next(), op.name, nextSort(state.scenes));
-      return {
-        ok: true,
-        ops: [
-          { type: 'scene.upsert', scene },
-          { type: 'scene.activate', sceneId: scene.id },
-        ],
-      };
+      return { ok: true, ops: [{ type: 'scene.upsert', scene }] };
     }
     case 'scene.delete': {
       if (!state.scenes.some((scene) => scene.id === op.sceneId)) {
@@ -92,7 +109,6 @@ export function materialize(state: RoomState, op: ClientOp, ids: IdSource): Mate
           shape: { ...shape, id: ids.next(), sceneId, points: shape.points.map((point) => ({ ...point })) },
         });
       }
-      ops.push({ type: 'scene.activate', sceneId });
       return { ok: true, ops };
     }
     case 'scene.activate':
@@ -135,6 +151,29 @@ export function materialize(state: RoomState, op: ClientOp, ids: IdSource): Mate
       if (!asset || asset.class !== 'sound') return { ok: false, error: 'Sound not found' };
       return { ok: true, ops: [{ type: 'sound.play', assetId: asset.id }] };
     }
+    case 'ping':
+      return indicate(state, op.sceneId, by, { type: 'ping', id: op.id, sceneId: op.sceneId, x: op.x, y: op.y, name: '' });
+    case 'mark':
+      return indicate(state, op.sceneId, by, {
+        type: 'mark',
+        id: op.id,
+        sceneId: op.sceneId,
+        points: op.points.map((point) => ({ x: point.x, y: point.y })),
+        name: '',
+      });
+    case 'ruler':
+      return indicate(state, op.sceneId, by, {
+        type: 'ruler',
+        id: op.id,
+        sceneId: op.sceneId,
+        x: op.x,
+        y: op.y,
+        x2: op.x2,
+        y2: op.y2,
+        name: '',
+      });
+    case 'ruler.clear':
+      return { ok: true, ops: [{ type: 'ruler.clear', id: op.id }] };
     case 'asset.delete':
       if (!state.assets.some((asset) => asset.id === op.assetId)) {
         return { ok: false, error: 'Asset not found' };
@@ -181,6 +220,10 @@ function updateScene(state: RoomState, op: Extract<ClientOp, { type: 'scene.upda
   }
   if (op.mapFrame !== undefined) next.mapFrame = op.mapFrame;
   if (op.backgroundFrame !== undefined) next.backgroundFrame = op.backgroundFrame;
+  if (op.rulerUnit !== undefined) next.rulerUnit = op.rulerUnit;
+  if (op.rulerScale !== undefined && Number.isFinite(op.rulerScale) && op.rulerScale > 0) {
+    next.rulerScale = clamp(op.rulerScale, MIN_RULER_SCALE, MAX_RULER_SCALE);
+  }
   return { ok: true, ops: [{ type: 'scene.upsert', scene: next }] };
 }
 
@@ -297,7 +340,7 @@ function addFog(
     id: ids.next(),
     sceneId: scene.id,
     kind: op.kind,
-    mode: op.mode,
+    mode: 'reveal',
     points: op.points.map((point) => ({
       x: clamp(point.x, -100000, 100000),
       y: clamp(point.y, -100000, 100000),
@@ -373,6 +416,10 @@ export function applyServerOp(state: RoomState, op: ServerOp): RoomState {
     case 'asset.remove':
       return removeAsset(state, op.assetId);
     case 'sound.play':
+    case 'ping':
+    case 'mark':
+    case 'ruler':
+    case 'ruler.clear':
       return state;
     default:
       return state;

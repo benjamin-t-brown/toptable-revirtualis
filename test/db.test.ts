@@ -55,7 +55,7 @@ describe('scene board persistence', () => {
 
     const db = openDatabase(file);
     const loaded = db.loadRoom('ROOM12');
-    expect(loaded?.state.scenes[0]).toMatchObject({ width: 5000, height: 5000 });
+    expect(loaded?.state.scenes[0]).toMatchObject({ width: 5000, height: 5000, rulerUnit: 'ft', rulerScale: 1 });
     db.close();
   });
 
@@ -95,6 +95,14 @@ describe('scene board persistence', () => {
       { code: 'ROOM12', activeSceneId: scene.id, assets: [], scenes: [framed], placements: [], fog: [] },
     );
     expect(db.loadRoom('ROOM12')?.state.scenes[0]?.mapFrame).toEqual(framed.mapFrame);
+    const measured = { ...framed, rulerUnit: 'm' as const, rulerScale: 25 };
+    persistOps(
+      db.raw,
+      'room',
+      [{ type: 'scene.upsert', scene: measured }],
+      { code: 'ROOM12', activeSceneId: scene.id, assets: [], scenes: [measured], placements: [], fog: [] },
+    );
+    expect(db.loadRoom('ROOM12')?.state.scenes[0]).toMatchObject({ rulerUnit: 'm', rulerScale: 25 });
     db.close();
   });
 
@@ -170,6 +178,36 @@ describe('scene board persistence', () => {
       { code: 'ROOM12', activeSceneId: scene.id, assets: [], scenes: [scene], placements: [placement], fog: [] },
     );
     expect(db.loadRoom('ROOM12')?.state.placements[0]?.label).toBe('Goblin');
+    db.close();
+  });
+
+  it('skips the active-scene write when that id did not change', () => {
+    const db = openDatabase(tempFile());
+    const scene = blankScene('scene-1', 'Scene 1', 0);
+    db.insertRoom(
+      {
+        id: 'room',
+        dmKeyHash: 'hash',
+        state: { code: 'ROOM12', activeSceneId: scene.id, assets: [], scenes: [scene], placements: [], fog: [] },
+      },
+      scene,
+    );
+    const previous = db.loadRoom('ROOM12')?.state;
+    expect(previous?.activeSceneId).toBe(scene.id);
+    if (!previous) return;
+    db.raw.prepare('UPDATE rooms SET active_scene_id = ? WHERE id = ?').run('other', 'room');
+    persistOps(
+      db.raw,
+      'room',
+      [{ type: 'ping', id: '11111111-1111-1111-1111-111111111111', sceneId: scene.id, x: 1, y: 2, name: 'DM' }],
+      previous,
+      previous,
+    );
+    const skipped = db.raw.prepare('SELECT active_scene_id FROM rooms WHERE id = ?').get('room') as { active_scene_id: string };
+    expect(skipped.active_scene_id).toBe('other');
+    persistOps(db.raw, 'room', [{ type: 'scene.activate', sceneId: scene.id }], { ...previous, activeSceneId: 'scene-2' }, previous);
+    const written = db.raw.prepare('SELECT active_scene_id FROM rooms WHERE id = ?').get('room') as { active_scene_id: string };
+    expect(written.active_scene_id).toBe('scene-2');
     db.close();
   });
 });

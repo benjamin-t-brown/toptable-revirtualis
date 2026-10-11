@@ -17,6 +17,7 @@ export function resizedPlacement(
   pointer: Point,
   shift: boolean,
   max = 8000,
+  aspect?: number,
 ): Pick<Placement, 'x' | 'y' | 'w' | 'h'> {
   const sign = signFor(handle);
   const cos = Math.cos(placement.rotation);
@@ -33,17 +34,45 @@ export function resizedPlacement(
   const vy = pointer.y - opp.y;
   let newW = sign.x * (vx * ux.x + vy * ux.y);
   let newH = sign.y * (vx * uy.x + vy * uy.y);
-  if (shift && placement.w > 0 && placement.h > 0) {
-    const aspect = placement.w / placement.h;
+  const ratio = lockedRatio(placement, shift, aspect);
+  if (ratio !== null) {
     if (Math.abs(newW) / placement.w >= Math.abs(newH) / placement.h) {
-      newH = Math.sign(newH || 1) * (Math.abs(newW) / aspect);
+      newH = Math.sign(newH || 1) * (Math.abs(newW) / ratio);
     } else {
-      newW = Math.sign(newW || 1) * (Math.abs(newH) * aspect);
+      newW = Math.sign(newW || 1) * (Math.abs(newH) * ratio);
     }
+    const fitted = fitAspect(Math.abs(newW), Math.abs(newH), max);
+    newW = fitted.w;
+    newH = fitted.h;
+  } else {
+    newW = clamp(newW, MIN_SIZE, max);
+    newH = clamp(newH, MIN_SIZE, max);
   }
-  newW = clamp(newW, MIN_SIZE, max);
-  newH = clamp(newH, MIN_SIZE, max);
   const ncx = opp.x + ux.x * (sign.x * newW / 2) + uy.x * (sign.y * newH / 2);
   const ncy = opp.y + ux.y * (sign.x * newW / 2) + uy.y * (sign.y * newH / 2);
   return { x: ncx - newW / 2, y: ncy - newH / 2, w: newW, h: newH };
+}
+
+function lockedRatio(placement: Placement, shift: boolean, aspect: number | undefined): number | null {
+  if (!shift || placement.w <= 0 || placement.h <= 0) return null;
+  if (aspect !== undefined && Number.isFinite(aspect) && aspect > 0) return aspect;
+  return placement.w / placement.h;
+}
+
+function fitAspect(width: number, height: number, max: number): { w: number; h: number } {
+  let w = width;
+  let h = height;
+  if (!(w > 0) || !(h > 0)) return { w: MIN_SIZE, h: MIN_SIZE };
+  const shrink = Math.min(1, max / w, max / h);
+  w *= shrink;
+  h *= shrink;
+  const grow = Math.max(1, MIN_SIZE / w, MIN_SIZE / h);
+  w *= grow;
+  h *= grow;
+  if (w > max || h > max) {
+    const again = Math.min(max / w, max / h);
+    w *= again;
+    h *= again;
+  }
+  return { w, h };
 }

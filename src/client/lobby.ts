@@ -125,9 +125,21 @@ export function mountLobby(root: HTMLElement, codeHint: string, enter: (code: st
     reclaimBtn,
   );
 
+  const loadName = textInput('DM');
+  const loadFile = document.createElement('input');
+  loadFile.type = 'file';
+  loadFile.accept = '.zip,application/zip';
+  const loadBtn = document.createElement('button');
+  loadBtn.type = 'button';
+  loadBtn.textContent = 'Load room';
+  const loadSet = document.createElement('fieldset');
+  const loadLegend = document.createElement('legend');
+  loadLegend.textContent = 'Load room';
+  loadSet.append(loadLegend, field('Your name', loadName), field('Room archive', loadFile), loadBtn);
+
   const grid = document.createElement('div');
   grid.className = 'lobby-grid';
-  grid.append(createSet, joinSet, reclaimSet);
+  grid.append(createSet, joinSet, reclaimSet, loadSet);
   page.append(bar, notice, error, grid);
   root.replaceChildren(page);
 
@@ -153,6 +165,31 @@ export function mountLobby(root: HTMLElement, codeHint: string, enter: (code: st
     void post(`/api/rooms/${encodeURIComponent(joinCode.value.trim())}/join`, { name: joinName.value })
       .then(finish)
       .catch(showError);
+  });
+  loadBtn.addEventListener('click', () => {
+    error.hidden = true;
+    const file = loadFile.files?.[0];
+    if (!file) {
+      showError(new Error('Choose a room archive'));
+      return;
+    }
+    const body = new FormData();
+    body.set('name', loadName.value);
+    body.set('file', file);
+    loadBtn.disabled = true;
+    void fetch('/api/rooms/import', { method: 'POST', body })
+      .then(async (response) => {
+        const data: unknown = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const message = data && typeof data === 'object' && 'error' in data ? String(data.error) : 'Could not load the room';
+          throw new Error(message);
+        }
+        finish(data as SessionResponse);
+      })
+      .catch(showError)
+      .finally(() => {
+        loadBtn.disabled = false;
+      });
   });
   reclaimBtn.addEventListener('click', () => {
     error.hidden = true;

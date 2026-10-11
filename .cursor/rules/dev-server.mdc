@@ -1,0 +1,13 @@
+---
+description: Do not start or restart the local dev server; the user runs it separately
+alwaysApply: true
+---
+
+# Dev server
+
+The user runs the local dev server separately (`npm run dev`, http://127.0.0.1:5173).
+
+- Do not start, stop, or restart the dev server to check a change.
+- Do not launch a second copy to verify the app.
+- If a restart is needed, ask the user to restart it and wait for them to say it is up.
+- Tests (`npm test`) and `npm run check` are fine to run yourself.

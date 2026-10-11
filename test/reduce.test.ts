@@ -108,7 +108,7 @@ describe('room reducer', () => {
     state.scenes[0]!.fogEnabled = false;
     const made = materialize(
       state,
-      { type: 'fog.add', sceneId: 'scene-1', kind: 'rect', mode: 'reveal', points: [], x: 20, y: 10, w: -12, h: 8 },
+      { type: 'fog.add', sceneId: 'scene-1', kind: 'rect', mode: 'cover', points: [], x: 20, y: 10, w: -12, h: 8 },
       ids(),
     );
     expect(made.ok).toBe(true);
@@ -183,7 +183,7 @@ describe('room reducer', () => {
     expect(next.scenes).toHaveLength(2);
     expect(next.placements).toHaveLength(2);
     expect(next.fog).toHaveLength(2);
-    expect(next.activeSceneId).not.toBe('scene-1');
+    expect(next.activeSceneId).toBe('scene-1');
     const copy = next.placements.find((placement) => placement.id !== 'place-1');
     expect(copy?.owners).toEqual(['Ada']);
     copy?.owners.push('Bea');
@@ -212,5 +212,64 @@ describe('room reducer', () => {
     const next = made.ops.reduce(applyServerOp, state);
     expect(next.assets.find((asset) => asset.id === 'token-1')?.folder).toBe('People/Humans');
     expect(materialize(state, { type: 'asset.move', assetId: 'map-1', folder: 'People' }, ids()).ok).toBe(false);
+  });
+
+  it('stores the ruler unit and pixels-per-unit scale on the scene', () => {
+    const state = base();
+    const made = materialize(state, { type: 'scene.update', sceneId: 'scene-1', rulerUnit: 'm', rulerScale: 40 }, ids());
+    expect(made.ok).toBe(true);
+    if (!made.ok) return;
+    const next = made.ops.reduce(applyServerOp, state);
+    expect(next.scenes[0]).toMatchObject({ rulerUnit: 'm', rulerScale: 40 });
+    const tiny = materialize(next, { type: 'scene.update', sceneId: 'scene-1', rulerScale: 0.0001 }, ids());
+    expect(tiny.ok).toBe(true);
+    if (!tiny.ok) return;
+    expect(tiny.ops.reduce(applyServerOp, next).scenes[0]?.rulerScale).toBe(0.01);
+  });
+
+  it('names a ruler without storing it on the room', () => {
+    const state = base();
+    const id = '00000000-0000-4000-8000-000000000098';
+    const shown = materialize(state, { type: 'ruler', id, sceneId: 'scene-1', x: 0, y: 0, x2: 30, y2: 40 }, ids(), 'Ada');
+    expect(shown).toEqual({
+      ok: true,
+      ops: [{ type: 'ruler', id, sceneId: 'scene-1', x: 0, y: 0, x2: 30, y2: 40, name: 'Ada' }],
+    });
+    if (!shown.ok) return;
+    expect(applyServerOp(state, shown.ops[0]!)).toBe(state);
+    const cleared = materialize(state, { type: 'ruler.clear', id }, ids(), 'Ada');
+    expect(cleared).toEqual({ ok: true, ops: [{ type: 'ruler.clear', id }] });
+  });
+
+  it('names a ping and a stroke without storing them on the room', () => {
+    const state = base();
+    const id = '00000000-0000-4000-8000-000000000099';
+    const ping = materialize(state, { type: 'ping', id, sceneId: 'scene-1', x: 12, y: 8 }, ids(), 'Ada');
+    expect(ping).toEqual({
+      ok: true,
+      ops: [{ type: 'ping', id, sceneId: 'scene-1', x: 12, y: 8, name: 'Ada' }],
+    });
+    if (!ping.ok) return;
+    expect(applyServerOp(state, ping.ops[0]!)).toBe(state);
+    const mark = materialize(
+      state,
+      {
+        type: 'mark',
+        id,
+        sceneId: 'scene-1',
+        points: [
+          { x: 1, y: 2 },
+          { x: 3, y: 4 },
+        ],
+      },
+      ids(),
+      'Bea',
+    );
+    expect(mark.ok).toBe(true);
+    if (!mark.ok) return;
+    expect(mark.ops[0]).toMatchObject({ type: 'mark', name: 'Bea' });
+    expect(applyServerOp(state, mark.ops[0]!)).toBe(state);
+    expect(materialize(state, { type: 'ping', id, sceneId: 'missing', x: 0, y: 0 }, ids(), 'Ada').ok).toBe(false);
+    expect(materialize(state, { type: 'ping', id, sceneId: 'scene-1', x: 0, y: 0 }, ids(), '').ok).toBe(false);
   });
 });

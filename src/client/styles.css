@@ -148,7 +148,11 @@ p { margin: 8px 0; }
 .stage[data-tool='pan'] canvas { cursor: grab; }
 .stage[data-tool='polygon'] canvas,
 .stage[data-tool='rect'] canvas,
-.stage[data-tool='ellipse'] canvas { cursor: crosshair; }
+.stage[data-tool='ellipse'] canvas,
+.stage[data-tool='ping'] canvas,
+.stage[data-tool='draw'] canvas,
+.stage[data-tool='ruler'] canvas,
+.stage[data-calibrate='1'] canvas { cursor: crosshair; }
 
 .toolbar {
   position: absolute;
@@ -281,6 +285,42 @@ p { margin: 8px 0; }
 }
 
 .asset-filter { width: 100%; margin-top: 6px; }
+
+.scene-row {
+  flex-wrap: nowrap;
+  width: 100%;
+  min-width: 0;
+}
+
+.scene-row > .scene-name {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  line-height: 24px;
+}
+
+.scene-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  align-items: center;
+}
+
+.scene-actions .icon-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 28px;
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  max-width: 28px;
+  padding: 0;
+  line-height: 1;
+}
 
 .asset-row { flex-wrap: nowrap; }
 

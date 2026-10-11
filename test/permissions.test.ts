@@ -53,6 +53,26 @@ describe('permissions', () => {
     for (const op of blocked) expect(canPerform(ada, state, op)).toBe(false);
   });
 
+  it('lets a player ping and draw on the table', () => {
+    const state = room();
+    const ada = { role: 'player' as const, name: 'Ada' };
+    const id = '00000000-0000-4000-8000-000000000010';
+    expect(canPerform(ada, state, { type: 'ping', id, sceneId: scene.id, x: 1, y: 2 })).toBe(true);
+    expect(canPerform(ada, state, { type: 'ruler', id, sceneId: scene.id, x: 0, y: 0, x2: 10, y2: 0 })).toBe(true);
+    expect(canPerform(ada, state, { type: 'ruler.clear', id })).toBe(true);
+    expect(
+      canPerform(ada, state, {
+        type: 'mark',
+        id,
+        sceneId: scene.id,
+        points: [
+          { x: 0, y: 0 },
+          { x: 4, y: 4 },
+        ],
+      }),
+    ).toBe(true);
+  });
+
   it('lets the DM do all of those', () => {
     const state = room();
     const dm = { role: 'dm' as const, name: 'DM' };

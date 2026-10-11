@@ -4,6 +4,7 @@ import { extname, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Busboy from 'busboy';
 import type { Hub } from './hub.js';
+import { MAX_ARCHIVE_BYTES } from '../shared/archive.js';
 import { maxUploadBytes, sniff } from './files.js';
 import type { Asset, AssetClass } from '../shared/types.js';
 import { cleanAssetName, isAssetClass, isRecord } from '../shared/validate.js';
@@ -147,6 +148,35 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse, c
     return;
   }
 
+  const exported = /^\/api\/rooms\/([^/]+)\/export$/.exec(path);
+  if (method === 'GET' && exported?.[1]) {
+    const code = roomCode(exported[1]);
+    const token = bearer(req);
+    if (!code || !token) {
+      sendJson(res, token ? 400 : 401, { error: token ? 'Bad room code' : 'Missing session' });
+      return;
+    }
+    const result = ctx.hub.exportRoom(token, code);
+    if (!result.ok) {
+      sendJson(res, result.status, { error: result.error });
+      return;
+    }
+    res.writeHead(200, {
+      'content-type': 'application/zip',
+      'content-length': result.value.length,
+      'content-disposition': `attachment; filename="toptable-${code}.zip"`,
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    });
+    res.end(result.value);
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/rooms/import') {
+    await receiveImport(req, res, ctx);
+    return;
+  }
+
   const upload = /^\/api\/rooms\/([^/]+)\/assets$/.exec(path);
   if (method === 'POST' && upload?.[1]) {
     const code = roomCode(upload[1]);
@@ -275,6 +305,80 @@ function receiveUpload(req: IncomingMessage, res: ServerResponse, ctx: HttpConte
           if (!res.headersSent) sendJson(res, 500, { error: 'Server error' });
         }
         finish();
+      });
+    });
+    req.pipe(parser);
+  });
+}
+
+function receiveImport(req: IncomingMessage, res: ServerResponse, ctx: HttpContext): Promise<void> {
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      resolvePromise();
+    };
+    let parser: ReturnType<typeof Busboy>;
+    try {
+      parser = Busboy({
+        headers: req.headers,
+        limits: { files: 1, fileSize: MAX_ARCHIVE_BYTES, fields: 4, fieldSize: 200 },
+      });
+    } catch {
+      sendJson(res, 400, { error: 'Expected a room archive' });
+      finish();
+      return;
+    }
+    let name = 'DM';
+    let bytes: Buffer | null = null;
+    let tooBig = false;
+    let fileDone = Promise.resolve();
+    let failed = false;
+    parser.on('field', (field, value) => {
+      if (field === 'name') name = value;
+    });
+    parser.on('file', (_field, stream) => {
+      const chunks: Buffer[] = [];
+      fileDone = new Promise((resolveFile) => {
+        stream.on('limit', () => {
+          tooBig = true;
+        });
+        stream.on('data', (chunk: Buffer) => {
+          if (!tooBig) chunks.push(chunk);
+        });
+        stream.on('end', () => {
+          if (!tooBig) bytes = Buffer.concat(chunks);
+          resolveFile();
+        });
+        stream.on('error', () => resolveFile());
+      });
+    });
+    parser.on('error', () => {
+      failed = true;
+      if (!res.headersSent) sendJson(res, 400, { error: 'Could not read the archive' });
+      finish();
+    });
+    parser.on('close', () => {
+      void fileDone.then(() => {
+        if (settled || failed) return;
+        try {
+          if (tooBig) {
+            sendJson(res, 413, { error: 'Archive is too large' });
+            return;
+          }
+          if (!bytes) {
+            sendJson(res, 400, { error: 'Choose a room archive' });
+            return;
+          }
+          const result = ctx.hub.importRoom(name, bytes);
+          sendJson(res, result.ok ? 201 : result.status, result.ok ? result.value : { error: result.error });
+        } catch (error) {
+          console.error(error);
+          if (!res.headersSent) sendJson(res, 500, { error: 'Server error' });
+        } finally {
+          finish();
+        }
       });
     });
     req.pipe(parser);

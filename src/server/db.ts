@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync, type SQLOutputValue } from 'node:sqlite';
-import { sceneBoard, type Asset, type AssetClass, type FogShape, type ImageFrame, type Placement, type Role, type RoomState, type Scene } from '../shared/types.js';
+import { sceneBoard, type Asset, type AssetClass, type FogShape, type ImageFrame, type Placement, type Role, type RoomState, type RulerUnit, type Scene } from '../shared/types.js';
 import { parseImageFrame } from '../shared/validate.js';
 
 export interface StoredSession {
@@ -37,6 +37,15 @@ function text(value: SQLOutputValue | undefined): string {
 
 function numberValue(value: SQLOutputValue | undefined): number {
   return typeof value === 'number' ? value : Number(value ?? 0);
+}
+
+function rulerUnit(value: SQLOutputValue | undefined): RulerUnit {
+  return value === 'm' ? 'm' : 'ft';
+}
+
+function rulerScale(value: SQLOutputValue | undefined): number {
+  const scale = numberValue(value);
+  return scale > 0 && Number.isFinite(scale) ? scale : 1;
 }
 
 function nullableText(value: SQLOutputValue | undefined): string | null {
@@ -114,7 +123,9 @@ CREATE TABLE IF NOT EXISTS scenes (
   width REAL NOT NULL DEFAULT 5000,
   height REAL NOT NULL DEFAULT 5000,
   map_frame TEXT,
-  background_frame TEXT
+  background_frame TEXT,
+  ruler_unit TEXT NOT NULL DEFAULT 'ft',
+  ruler_scale REAL NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS placements (
   id TEXT PRIMARY KEY,
@@ -168,6 +179,8 @@ function ensureSceneBoardColumns(db: DatabaseSync): void {
   if (!names.has('height')) db.exec('ALTER TABLE scenes ADD COLUMN height REAL NOT NULL DEFAULT 5000');
   if (!names.has('map_frame')) db.exec('ALTER TABLE scenes ADD COLUMN map_frame TEXT');
   if (!names.has('background_frame')) db.exec('ALTER TABLE scenes ADD COLUMN background_frame TEXT');
+  if (!names.has('ruler_unit')) db.exec("ALTER TABLE scenes ADD COLUMN ruler_unit TEXT NOT NULL DEFAULT 'ft'");
+  if (!names.has('ruler_scale')) db.exec('ALTER TABLE scenes ADD COLUMN ruler_scale REAL NOT NULL DEFAULT 1');
 }
 
 function ensurePlacementLabelColumn(db: DatabaseSync): void {
@@ -228,8 +241,8 @@ export class AppDatabase {
   insertScene(roomId: string, scene: Scene): void {
     this.raw
       .prepare(
-        `INSERT INTO scenes (id, room_id, name, map_asset_id, background_asset_id, background_color, fog_enabled, sort_index, width, height, map_frame, background_frame)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO scenes (id, room_id, name, map_asset_id, background_asset_id, background_color, fog_enabled, sort_index, width, height, map_frame, background_frame, ruler_unit, ruler_scale)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         scene.id,
@@ -244,6 +257,8 @@ export class AppDatabase {
         scene.height,
         frameText(scene.mapFrame),
         frameText(scene.backgroundFrame),
+        scene.rulerUnit === 'm' ? 'm' : 'ft',
+        scene.rulerScale > 0 ? scene.rulerScale : 1,
       );
   }
 
@@ -299,7 +314,7 @@ export class AppDatabase {
       .map((row) => this.assetRow(row));
     const scenes = this.raw
       .prepare(
-        'SELECT id, name, map_asset_id, background_asset_id, background_color, fog_enabled, sort_index, width, height, map_frame, background_frame FROM scenes WHERE room_id = ?',
+        'SELECT id, name, map_asset_id, background_asset_id, background_color, fog_enabled, sort_index, width, height, map_frame, background_frame, ruler_unit, ruler_scale FROM scenes WHERE room_id = ?',
       )
       .all(id)
       .map((row) => this.sceneRow(row));
@@ -342,6 +357,8 @@ export class AppDatabase {
       fogEnabled: numberValue(row.fog_enabled) === 1,
       width: board.width,
       height: board.height,
+      rulerUnit: rulerUnit(row.ruler_unit),
+      rulerScale: rulerScale(row.ruler_scale),
       sortIndex: numberValue(row.sort_index),
       mapFrame: readFrame(row.map_frame),
       backgroundFrame: readFrame(row.background_frame),
@@ -408,6 +425,19 @@ export class AppDatabase {
       .prepare('SELECT file_id, name, mime FROM default_tokens ORDER BY name')
       .all()
       .map((row) => ({ fileId: text(row.file_id), name: text(row.name), mime: text(row.mime) }));
+  }
+
+  starterSources(roomId: string): Map<string, string> {
+    const rows = this.raw
+      .prepare(
+        `SELECT assets.id AS id, default_tokens.source AS source
+         FROM assets JOIN default_tokens ON default_tokens.file_id = assets.file_id
+         WHERE assets.room_id = ?`,
+      )
+      .all(roomId);
+    const sources = new Map<string, string>();
+    for (const row of rows) sources.set(text(row.id), text(row.source));
+    return sources;
   }
 
   sharedAssetIds(roomId: string): string[] {

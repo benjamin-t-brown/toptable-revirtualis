@@ -8,12 +8,15 @@ import {
   type Point,
   type Role,
   type RoomState,
+  type RulerUnit,
+  type Scene,
 } from '../../shared/types.js';
-import { activeScene } from '../../shared/reduce.js';
 import { applyWorldTransform, visibleWorld, type Camera } from './camera.js';
+import { markOpacity, pingOpacity, type LivePing, type LiveStroke } from '../../shared/marks.js';
+import { formatRuler, type LiveRuler } from '../../shared/ruler.js';
 import { sceneryKind, sceneryPlacement } from './scenery.js';
 
-export type Tool = 'select' | 'pan' | 'polygon' | 'rect' | 'ellipse';
+export type Tool = 'select' | 'pan' | 'ping' | 'draw' | 'ruler' | 'polygon' | 'rect' | 'ellipse';
 
 export interface DraftBox {
   x: number;
@@ -34,12 +37,24 @@ export interface DrawModel {
   polygon: Point[];
   polygonCursor: Point | null;
   draft: DraftBox | null;
+  pings: LivePing[];
+  marks: LiveStroke[];
+  rulers: LiveRuler[];
+  calibrate: { span: number; unit: RulerUnit; x: number; y: number; w: number; h: number } | null;
+  ink: Point[] | null;
+  now: number;
+  sceneId: string | null;
   width: number;
   height: number;
   dpr: number;
 }
 
 const FOG = '#10180e';
+
+function shownScene(model: DrawModel): Scene | null {
+  if (!model.sceneId) return null;
+  return model.room.scenes.find((scene) => scene.id === model.sceneId) ?? null;
+}
 
 function traceShape(ctx: CanvasRenderingContext2D, shape: FogShape): void {
   ctx.beginPath();
@@ -68,7 +83,7 @@ function drawFog(
 ): boolean {
   fog.setTransform(1, 0, 0, 1, 0, 0);
   fog.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
-  const scene = activeScene(model.room);
+  const scene = shownScene(model);
   if (!scene?.fogEnabled) return false;
   applyWorldTransform(fog, model.camera, model.width, model.height, model.dpr);
   const view = visibleWorld(model.camera, model.width, model.height);
@@ -78,7 +93,7 @@ function drawFog(
     .filter((shape) => shape.sceneId === scene.id)
     .sort((a, b) => a.sortIndex - b.sortIndex);
   for (const shape of shapes) {
-    fog.globalCompositeOperation = shape.mode === 'reveal' ? 'destination-out' : 'source-over';
+    fog.globalCompositeOperation = 'destination-out';
     fog.fillStyle = FOG;
     traceShape(fog, shape);
     fog.fill();
@@ -183,7 +198,7 @@ export function drawTable(
   model: DrawModel,
 ): void {
   if (model.width < 1 || model.height < 1) return;
-  const scene = activeScene(model.room);
+  const scene = shownScene(model);
   ctx.setTransform(model.dpr, 0, 0, model.dpr, 0, 0);
   ctx.fillStyle = TABLE_BACKDROP;
   ctx.fillRect(0, 0, model.width, model.height);
@@ -217,7 +232,7 @@ export function drawTable(
     const shapes = model.room.fog.filter((shape) => shape.sceneId === scene.id);
     ctx.lineWidth = 1 / model.camera.zoom;
     for (const shape of shapes) {
-      ctx.strokeStyle = shape.mode === 'cover' ? '#E7D5B1' : '#A1CA0C';
+      ctx.strokeStyle = '#A1CA0C';
       traceShape(ctx, shape);
       ctx.stroke();
     }
@@ -235,6 +250,8 @@ export function drawTable(
       ctx.stroke();
     }
   }
+  if (scene) drawIndicators(ctx, model, scene);
+  if (model.calibrate && model.calibrate.w > 0 && model.calibrate.h > 0) drawCalibrate(ctx, model);
   if (model.draft && model.draft.w > 0 && model.draft.h > 0) {
     ctx.strokeStyle = '#A1CA0C';
     ctx.lineWidth = 2 / model.camera.zoom;
@@ -259,4 +276,147 @@ export function drawTable(
       : model.room.placements.find((placement) => placement.id === model.selectionId);
     if (selected && selected.sceneId === scene.id) drawHandles(ctx, model, selected);
   }
+}
+
+function drawIndicators(ctx: CanvasRenderingContext2D, model: DrawModel, scene: Scene): void {
+  const zoom = model.camera.zoom;
+  for (const mark of model.marks) {
+    if (mark.sceneId !== scene.id) continue;
+    drawStroke(ctx, mark.points, zoom, markOpacity(model.now - mark.at));
+  }
+  if (model.ink && model.ink.length > 1) drawStroke(ctx, model.ink, zoom, 1);
+  for (const ping of model.pings) {
+    if (ping.sceneId !== scene.id) continue;
+    drawPing(ctx, zoom, ping, pingOpacity(model.now - ping.at));
+  }
+  for (const ruler of model.rulers) {
+    if (ruler.sceneId !== scene.id) continue;
+    drawRuler(ctx, zoom, ruler, scene);
+  }
+}
+
+function drawStroke(ctx: CanvasRenderingContext2D, points: Point[], zoom: number, alpha: number): void {
+  const first = points[0];
+  if (!first || points.length < 2 || alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(first.x, first.y);
+  for (const point of points.slice(1)) ctx.lineTo(point.x, point.y);
+  ctx.strokeStyle = 'rgba(14, 20, 12, 0.9)';
+  ctx.lineWidth = 6 / zoom;
+  ctx.stroke();
+  ctx.strokeStyle = '#F2E27A';
+  ctx.lineWidth = 2.5 / zoom;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawCalibrate(ctx: CanvasRenderingContext2D, model: DrawModel): void {
+  const box = model.calibrate;
+  if (!box) return;
+  const zoom = model.camera.zoom;
+  const label = `${box.span}×${box.span} ${box.unit}`;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(14, 20, 12, 0.85)';
+  ctx.lineWidth = 5 / zoom;
+  ctx.strokeRect(box.x, box.y, box.w, box.h);
+  ctx.strokeStyle = '#D7E7F5';
+  ctx.lineWidth = 2 / zoom;
+  ctx.strokeRect(box.x, box.y, box.w, box.h);
+  ctx.restore();
+  const fontPx = 14 / zoom;
+  const pad = 4 / zoom;
+  const textX = box.x + box.w / 2;
+  const textY = box.y - 12 / zoom;
+  ctx.save();
+  ctx.font = `${fontPx}px Verdana, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  const width = ctx.measureText(label).width;
+  ctx.fillStyle = 'rgba(14, 20, 12, 0.88)';
+  ctx.fillRect(textX - width / 2 - pad, textY - fontPx - pad, width + pad * 2, fontPx + pad * 2);
+  ctx.fillStyle = '#F4F7FB';
+  ctx.fillText(label, textX, textY);
+  ctx.restore();
+}
+
+function drawRuler(ctx: CanvasRenderingContext2D, zoom: number, ruler: LiveRuler, scene: Scene): void {
+  const unit = scene.rulerUnit === 'm' ? 'm' : 'ft';
+  const scale = scene.rulerScale > 0 && Number.isFinite(scene.rulerScale) ? scene.rulerScale : 1;
+  const label = formatRuler({ x: ruler.x, y: ruler.y }, { x: ruler.x2, y: ruler.y2 }, scale, unit);
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(ruler.x, ruler.y);
+  ctx.lineTo(ruler.x2, ruler.y2);
+  ctx.strokeStyle = 'rgba(14, 20, 12, 0.85)';
+  ctx.lineWidth = 5 / zoom;
+  ctx.stroke();
+  ctx.strokeStyle = '#D7E7F5';
+  ctx.lineWidth = 2 / zoom;
+  ctx.stroke();
+  ctx.fillStyle = '#D7E7F5';
+  const cap = 3.5 / zoom;
+  ctx.beginPath();
+  ctx.arc(ruler.x, ruler.y, cap, 0, Math.PI * 2);
+  ctx.arc(ruler.x2, ruler.y2, cap, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  const dx = ruler.x2 - ruler.x;
+  const dy = ruler.y2 - ruler.y;
+  const len = Math.hypot(dx, dy);
+  const nx = len < 0.001 ? 0 : -dy / len;
+  const ny = len < 0.001 ? -1 : dx / len;
+  const lift = 16 / zoom;
+  const textX = (ruler.x + ruler.x2) / 2 + nx * lift;
+  const textY = (ruler.y + ruler.y2) / 2 + ny * lift;
+  const fontPx = 14 / zoom;
+  const pad = 4 / zoom;
+  ctx.save();
+  ctx.font = `${fontPx}px Verdana, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const width = ctx.measureText(label).width;
+  ctx.fillStyle = 'rgba(14, 20, 12, 0.88)';
+  ctx.fillRect(textX - width / 2 - pad, textY - fontPx / 2 - pad, width + pad * 2, fontPx + pad * 2);
+  ctx.fillStyle = '#F4F7FB';
+  ctx.fillText(label, textX, textY);
+  ctx.restore();
+}
+
+function drawPing(ctx: CanvasRenderingContext2D, zoom: number, ping: LivePing, alpha: number): void {
+  if (alpha <= 0) return;
+  const arm = 7 / zoom;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(ping.x - arm, ping.y - arm);
+  ctx.lineTo(ping.x + arm, ping.y + arm);
+  ctx.moveTo(ping.x + arm, ping.y - arm);
+  ctx.lineTo(ping.x - arm, ping.y + arm);
+  ctx.lineWidth = 3 / zoom;
+  ctx.strokeStyle = '#1a2a12';
+  ctx.stroke();
+  ctx.lineWidth = 1.25 / zoom;
+  ctx.strokeStyle = '#a1ca0c';
+  ctx.stroke();
+
+  const fontPx = 13 / zoom;
+  const pad = 3 / zoom;
+  const gap = 4 / zoom;
+  const textY = ping.y - arm - gap;
+  ctx.font = `${fontPx}px Verdana, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  const width = Math.min(ctx.measureText(ping.name).width, 220 / zoom);
+  ctx.fillStyle = 'rgba(14, 20, 12, 0.82)';
+  ctx.fillRect(ping.x - width / 2 - pad, textY - fontPx - pad, width + pad * 2, fontPx + pad * 2);
+  ctx.fillStyle = '#E7D5B1';
+  ctx.fillText(ping.name, ping.x, textY, 220 / zoom);
+  ctx.restore();
 }

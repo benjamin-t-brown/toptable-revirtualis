@@ -69,11 +69,57 @@ describe('scene size protocol', () => {
     expect(parseClientOp({ type: 'asset.move', assetId, folder: '' })).toBeNull();
   });
 
+  it('accepts a ping and a stroke, and rejects a stroke that is too short', () => {
+    const id = '00000000-0000-4000-8000-000000000004';
+    expect(parseClientOp({ type: 'ping', id, sceneId, x: 12, y: -4 })).toEqual({
+      type: 'ping',
+      id,
+      sceneId,
+      x: 12,
+      y: -4,
+    });
+    expect(parseClientOp({ type: 'ping', sceneId, x: 12, y: 4 })).toBeNull();
+    const points = [
+      { x: 0, y: 0 },
+      { x: 8, y: 3 },
+    ];
+    expect(parseClientOp({ type: 'mark', id, sceneId, points })).toEqual({
+      type: 'mark',
+      id,
+      sceneId,
+      points,
+    });
+    expect(parseClientOp({ type: 'mark', id, sceneId, points: [{ x: 0, y: 0 }] })).toBeNull();
+    expect(parseClientOp({ type: 'mark', id, sceneId, points: [{ x: 0, y: Number.NaN }, { x: 1, y: 1 }] })).toBeNull();
+  });
+
   it('rejects a board size that is not a finite positive number', () => {
     expect(parseClientOp({ type: 'scene.update', sceneId, width: 0 })).toBeNull();
     expect(parseClientOp({ type: 'scene.update', sceneId, width: -10 })).toBeNull();
     expect(parseClientOp({ type: 'scene.update', sceneId, height: Number.NaN })).toBeNull();
     expect(parseClientOp({ type: 'scene.update', sceneId, height: Number.POSITIVE_INFINITY })).toBeNull();
     expect(parseClientOp({ type: 'scene.update', sceneId, width: '5000' })).toBeNull();
+  });
+
+  it('accepts a ruler scale and a live measuring line', () => {
+    expect(parseClientOp({ type: 'scene.update', sceneId, rulerUnit: 'm', rulerScale: 12.5 })).toEqual({
+      type: 'scene.update',
+      sceneId,
+      rulerUnit: 'm',
+      rulerScale: 12.5,
+    });
+    expect(parseClientOp({ type: 'scene.update', sceneId, rulerUnit: 'yd' })).toBeNull();
+    expect(parseClientOp({ type: 'scene.update', sceneId, rulerScale: 0 })).toBeNull();
+    const id = '00000000-0000-4000-8000-000000000010';
+    expect(parseClientOp({ type: 'ruler', id, sceneId, x: 1, y: 2, x2: 3, y2: 4 })).toEqual({
+      type: 'ruler',
+      id,
+      sceneId,
+      x: 1,
+      y: 2,
+      x2: 3,
+      y2: 4,
+    });
+    expect(parseClientOp({ type: 'ruler.clear', id })).toEqual({ type: 'ruler.clear', id });
   });
 });

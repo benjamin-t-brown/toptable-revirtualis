@@ -40,6 +40,12 @@ export function frameOf(placement: Pick<Placement, 'x' | 'y' | 'w' | 'h' | 'rota
   return { x: placement.x, y: placement.y, w: placement.w, h: placement.h, rotation: placement.rotation };
 }
 
+export function imageAspect(image: CanvasImageSource | undefined): number | null {
+  const size = image ? sourceSize(image) : null;
+  if (!size) return null;
+  return size.w / size.h;
+}
+
 function naturalFrame(image: CanvasImageSource | undefined): ImageFrame | null {
   const size = image ? sourceSize(image) : null;
   if (!size) return null;

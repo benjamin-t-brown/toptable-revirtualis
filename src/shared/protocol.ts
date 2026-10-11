@@ -1,4 +1,5 @@
-import type { Asset, FogKind, FogMode, FogShape, ImageFrame, Placement, Point, Presence, Role, RoomState, Scene } from './types.js';
+import { MAX_STROKE_POINTS } from './marks.js';
+import type { Asset, FogKind, FogMode, FogShape, ImageFrame, Placement, Point, Presence, Role, RoomState, RulerUnit, Scene } from './types.js';
 import { cleanColor, cleanFolder, cleanLabel, cleanOwners, cleanSceneName, finiteNumber, isId, isRecord, parseImageFrame } from './validate.js';
 
 export interface SessionResponse {
@@ -26,6 +27,8 @@ export type ClientOp =
       fogEnabled?: boolean;
       width?: number;
       height?: number;
+      rulerScale?: number;
+      rulerUnit?: RulerUnit;
     }
   | { type: 'place.add'; sceneId: string; assetId: string; x: number; y: number }
   | { type: 'place.copy'; placementId: string; x: number; y: number }
@@ -56,6 +59,10 @@ export type ClientOp =
   | { type: 'fog.delete'; shapeId: string }
   | { type: 'fog.clear'; sceneId: string }
   | { type: 'sound.play'; assetId: string }
+  | { type: 'ping'; id: string; sceneId: string; x: number; y: number }
+  | { type: 'mark'; id: string; sceneId: string; points: Point[] }
+  | { type: 'ruler'; id: string; sceneId: string; x: number; y: number; x2: number; y2: number }
+  | { type: 'ruler.clear'; id: string }
   | { type: 'asset.delete'; assetId: string }
   | { type: 'asset.move'; assetId: string; folder: string };
 
@@ -82,7 +89,11 @@ export type ServerOp =
   | { type: 'fog.clear'; sceneId: string }
   | { type: 'asset.upsert'; asset: Asset }
   | { type: 'asset.remove'; assetId: string }
-  | { type: 'sound.play'; assetId: string };
+  | { type: 'sound.play'; assetId: string }
+  | { type: 'ping'; id: string; sceneId: string; x: number; y: number; name: string }
+  | { type: 'mark'; id: string; sceneId: string; points: Point[]; name: string }
+  | { type: 'ruler'; id: string; sceneId: string; x: number; y: number; x2: number; y2: number; name: string }
+  | { type: 'ruler.clear'; id: string };
 
 export interface SnapshotBody {
   role: Role;
@@ -133,6 +144,19 @@ function readPoints(value: unknown): Point[] | null {
     const x = finiteNumber(item.x);
     const y = finiteNumber(item.y);
     if (x === null || y === null) return null;
+    points.push({ x, y });
+  }
+  return points;
+}
+
+function readStroke(value: unknown): Point[] | null {
+  if (!Array.isArray(value) || value.length < 2 || value.length > MAX_STROKE_POINTS) return null;
+  const points: Point[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) return null;
+    const x = finiteNumber(item.x);
+    const y = finiteNumber(item.y);
+    if (x === null || y === null || Math.abs(x) > 100000 || Math.abs(y) > 100000) return null;
     points.push({ x, y });
   }
   return points;
@@ -197,6 +221,13 @@ export function parseClientOp(value: unknown): ClientOp | null {
       const height = optionalPositive(value, 'height');
       if (height === false) return null;
       if (height !== undefined) op.height = height;
+      if ('rulerUnit' in value) {
+        if (value.rulerUnit !== 'ft' && value.rulerUnit !== 'm') return null;
+        op.rulerUnit = value.rulerUnit;
+      }
+      const rulerScale = optionalPositive(value, 'rulerScale');
+      if (rulerScale === false) return null;
+      if (rulerScale !== undefined) op.rulerScale = rulerScale;
       return op;
     }
     case 'place.add': {
@@ -266,6 +297,30 @@ export function parseClientOp(value: unknown): ClientOp | null {
       return isId(value.sceneId) ? { type: 'fog.clear', sceneId: value.sceneId } : null;
     case 'sound.play':
       return isId(value.assetId) ? { type: 'sound.play', assetId: value.assetId } : null;
+    case 'ping': {
+      const x = finiteNumber(value.x);
+      const y = finiteNumber(value.y);
+      if (!isId(value.id) || !isId(value.sceneId) || x === null || y === null) return null;
+      if (Math.abs(x) > 100000 || Math.abs(y) > 100000) return null;
+      return { type: 'ping', id: value.id, sceneId: value.sceneId, x, y };
+    }
+    case 'mark': {
+      if (!isId(value.id) || !isId(value.sceneId)) return null;
+      const points = readStroke(value.points);
+      if (!points) return null;
+      return { type: 'mark', id: value.id, sceneId: value.sceneId, points };
+    }
+    case 'ruler': {
+      const x = finiteNumber(value.x);
+      const y = finiteNumber(value.y);
+      const x2 = finiteNumber(value.x2);
+      const y2 = finiteNumber(value.y2);
+      if (!isId(value.id) || !isId(value.sceneId) || x === null || y === null || x2 === null || y2 === null) return null;
+      if ([x, y, x2, y2].some((coord) => Math.abs(coord) > 100000)) return null;
+      return { type: 'ruler', id: value.id, sceneId: value.sceneId, x, y, x2, y2 };
+    }
+    case 'ruler.clear':
+      return isId(value.id) ? { type: 'ruler.clear', id: value.id } : null;
     case 'asset.delete':
       return isId(value.assetId) ? { type: 'asset.delete', assetId: value.assetId } : null;
     case 'asset.move': {

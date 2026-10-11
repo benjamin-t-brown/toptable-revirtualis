@@ -37,4 +37,17 @@ describe('placement hit testing and resize', () => {
     const next = resizedPlacement(piece(), 'se', { x: 150, y: 80 }, false);
     expect(next).toEqual({ x: 0, y: 0, w: 150, h: 80 });
   });
+
+  it('locks shift-resize to the image aspect, not the current box', () => {
+    const stretched = piece({ w: 100, h: 100 });
+    const next = resizedPlacement(stretched, 'se', { x: 200, y: 80 }, true, 8000, 2);
+    expect(next.w / next.h).toBeCloseTo(2);
+    expect(next).toEqual({ x: 0, y: 0, w: 200, h: 100 });
+  });
+
+  it('keeps the locked aspect when the drag hits the size cap', () => {
+    const next = resizedPlacement(piece({ w: 100, h: 50 }), 'se', { x: 9000, y: 9000 }, true, 800, 2);
+    expect(next.w).toBe(800);
+    expect(next.h).toBe(400);
+  });
 });

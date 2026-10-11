@@ -8,8 +8,8 @@ function frameText(frame: ImageFrame | null): string | null {
 
 function upsertScene(db: DatabaseSync, roomId: string, scene: Scene): void {
   db.prepare(
-    `INSERT INTO scenes (id, room_id, name, map_asset_id, background_asset_id, background_color, fog_enabled, sort_index, width, height, map_frame, background_frame)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO scenes (id, room_id, name, map_asset_id, background_asset_id, background_color, fog_enabled, sort_index, width, height, map_frame, background_frame, ruler_unit, ruler_scale)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name,
        map_asset_id = excluded.map_asset_id,
@@ -20,7 +20,9 @@ function upsertScene(db: DatabaseSync, roomId: string, scene: Scene): void {
        width = excluded.width,
        height = excluded.height,
        map_frame = excluded.map_frame,
-       background_frame = excluded.background_frame`,
+       background_frame = excluded.background_frame,
+       ruler_unit = excluded.ruler_unit,
+       ruler_scale = excluded.ruler_scale`,
   ).run(
     scene.id,
     roomId,
@@ -34,6 +36,8 @@ function upsertScene(db: DatabaseSync, roomId: string, scene: Scene): void {
     scene.height,
     frameText(scene.mapFrame),
     frameText(scene.backgroundFrame),
+    scene.rulerUnit === 'm' ? 'm' : 'ft',
+    scene.rulerScale > 0 ? scene.rulerScale : 1,
   );
 }
 
@@ -95,7 +99,17 @@ function upsertFog(db: DatabaseSync, shape: FogShape): void {
   );
 }
 
-export function persistOps(db: DatabaseSync, roomId: string, ops: readonly ServerOp[], next: RoomState): void {
+export function persistPlacements(db: DatabaseSync, placements: readonly Placement[]): void {
+  for (const placement of placements) upsertPlacement(db, placement);
+}
+
+export function persistOps(
+  db: DatabaseSync,
+  roomId: string,
+  ops: readonly ServerOp[],
+  next: RoomState,
+  previous: RoomState | null = null,
+): void {
   for (const op of ops) {
     switch (op.type) {
       case 'scene.upsert':
@@ -146,10 +160,16 @@ export function persistOps(db: DatabaseSync, roomId: string, ops: readonly Serve
         db.prepare('DELETE FROM assets WHERE id = ?').run(op.assetId);
         break;
       case 'sound.play':
+      case 'ping':
+      case 'mark':
+      case 'ruler':
+      case 'ruler.clear':
         break;
       default:
         break;
     }
   }
-  db.prepare('UPDATE rooms SET active_scene_id = ? WHERE id = ?').run(next.activeSceneId, roomId);
+  if (!previous || previous.activeSceneId !== next.activeSceneId) {
+    db.prepare('UPDATE rooms SET active_scene_id = ? WHERE id = ?').run(next.activeSceneId, roomId);
+  }
 }

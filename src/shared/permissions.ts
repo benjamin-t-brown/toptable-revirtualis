@@ -14,6 +14,7 @@ export function controlsPlacement(actor: Actor, owners: readonly string[]): bool
 }
 
 export function canPerform(actor: Actor, state: RoomState, op: ClientOp): boolean {
+  if (op.type === 'ping' || op.type === 'mark' || op.type === 'ruler' || op.type === 'ruler.clear') return true;
   if (op.type !== 'place.update') return actor.role === 'dm';
   const placement = state.placements.find((item) => item.id === op.placementId);
   if (!placement) return false;
